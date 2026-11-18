@@ -46,6 +46,32 @@ document.querySelector('#grid').addEventListener('click', event => {
 </script></body></html>`);
       return;
     }
+    if (request.method === 'GET' && url.pathname === '/node-links-sticky') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Sticky grid shell</title></head>
+<body><main><h1>Sticky grid</h1><iframe id="sticky-frame" title="Sticky record grid" src="/node-grid-sticky" style="width:900px;height:420px;border:0"></iframe></main></body></html>`);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/node-grid-sticky') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Sticky record grid</title>
+<style>
+html,body{margin:0} #scroll-root{height:320px;overflow:auto;position:relative;border:1px solid #777}
+#sticky-head{position:sticky;top:0;height:75px;box-sizing:border-box;background:#ddd;z-index:5;padding:12px}
+#spacer{height:124px} table{border-collapse:collapse;width:100%} td{height:44px;border:1px solid #aaa;padding:4px}
+.row-edit-option{display:none;cursor:pointer} tr:hover .row-edit-option{display:inline-block}
+</style></head><body><div id="scroll-root"><header id="sticky-head">Fixed table header</header><div id="spacer"></div>
+<table id="grid"><tbody><tr data-row-key="sticky-product-b"><td class="business-cell">Product B</td><td><span class="row-edit-option row-btn-ViewAction">对照表</span></td></tr>
+<tr data-row-key="sticky-product-c"><td>Product C</td><td></td></tr><tr data-row-key="sticky-product-d"><td>Product D</td><td></td></tr>
+<tr data-row-key="sticky-product-e"><td>Product E</td><td></td></tr></tbody></table><div style="height:160px"></div><output id="clicks">0</output></div>
+<script>
+const root=document.querySelector('#scroll-root'); root.scrollTop=158;
+document.querySelector('#grid').addEventListener('click',event=>{
+  if(event.target.closest('.row-btn-ViewAction')) document.querySelector('#clicks').textContent=String(Number(document.querySelector('#clicks').textContent)+1);
+});
+</script></body></html>`);
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/loading-view') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html><head><meta charset="utf-8"><title>Loading fixture</title></head>

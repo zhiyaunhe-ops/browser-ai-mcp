@@ -20,7 +20,7 @@ npm ci
 |---|---|
 | 找不到业务节点 | 先读父页面。检查 `ys.find()` 返回的 `entryPoints`，或用 `ys.entries({framePath,scope})` 找对照表按钮、行内链接和展开控件。 |
 | 多行都有同名入口 | 用 `ys.click(name,{rowText,framePath})` 指定该行一个单元格的完整值，再读新页面、弹窗或标签页的标题与业务字段。 |
-| 操作栏只在鼠标移入行后出现 | 用 `ys.entries({rowText,framePath,reveal:true})` 移到指定行并读取出现的入口。 |
+| 操作栏只在鼠标移入行后出现 | 用 `ys.entries({rowText,framePath,reveal:true})` 揭示入口。已渲染的行若被固定表头挡住，助手会滚动居中，再按同一单元格重新定位。 |
 | 找到正确行却只有「删除」 | 查看 `modeActions` 中实际可见的「修改」。需要进入编辑态时，先点页顶「修改」，再读同一行的「对照表」。 |
 | 选择多条后统一右移 | 用 `ys.transferState({scope,framePath})` 看左右明细和勾选状态，再用 `ys.transferRight(names,{scope,framePath})` 移动这一批。它核对右侧原有和新增条目。 |
 | 可见信息不足 | Agent 先读用友语义层，再按需要使用 ego 原生语义快照 `page.snapshot()`，最后才取视觉截图 `page.screenshot()`。 |

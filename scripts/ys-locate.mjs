@@ -17,7 +17,7 @@
 
 import { BUSY } from './ys-page.mjs';
 
-export const VERSION = "2026-11-18.3";
+export const VERSION = "2026-11-18.4";
 
 // 精确名才算「强匹配」：前缀/包含/同义词都算模糊，click 默认拒绝。
 export const STRONG = 1;
@@ -411,7 +411,7 @@ async function hoverEntryRow(page, opts) {
   if (typeof opts.rowText !== 'string' || !opts.rowText.trim() || !/^0(?:\/\d+)*$/.test(opts.framePath || '')) {
     throw new TypeError('reveal requires an exact rowText and an observed framePath');
   }
-  const target = await page.evaluate(({ path, scope, rowText, cellSelector }) => {
+  const readPoint = recenter => page.evaluate(({ path, scope, rowText, cellSelector, recenter }) => {
     let doc = document;
     const frames = [];
     for (const i of path.split('/').slice(1)) {
@@ -434,17 +434,33 @@ async function hoverEntryRow(page, opts) {
     }
     if (rows.size !== 1) return {ok:false, reason:rows.size ? 'ambiguous-row' : 'row-not-rendered'};
     const cell = rows.values().next().value;
+    const obscured = reason => {
+      if (!recenter) return {ok:false, reason};
+      cell.scrollIntoView({block:'center', inline:'nearest', behavior:'instant'});
+      return {ok:false, reason, scrolled:true};
+    };
     const r = cell.getBoundingClientRect();
     let x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
-    if (!cell.contains(doc.elementFromPoint(x, y))) return {ok:false, reason:'row-offscreen-or-covered'};
+    if (!cell.contains(doc.elementFromPoint(x, y))) return obscured('row-offscreen-or-covered');
     for (const frame of frames.reverse()) {
       const fr = frame.getBoundingClientRect();
       x += fr.left + frame.clientLeft;
       y += fr.top + frame.clientTop;
-      if (frame.ownerDocument.elementFromPoint(x,y) !== frame) return {ok:false, reason:'frame-offscreen-or-covered'};
+      if (frame.ownerDocument.elementFromPoint(x,y) !== frame) return obscured('frame-offscreen-or-covered');
     }
     return {ok:true,x,y};
-  }, {path:opts.framePath, scope:opts.scope, rowText:opts.rowText.replace(/\s+/g,' ').trim(), cellSelector:CELL});
+  }, {path:opts.framePath, scope:opts.scope, rowText:opts.rowText.replace(/\s+/g,' ').trim(), cellSelector:CELL, recenter});
+  let target = await readPoint(true);
+  if (target.scrolled) {
+    // Virtual grids can recycle the row object during scroll. Resolve the business cell again.
+    const deadline = Date.now() + 550;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 60));
+      target = await readPoint(false);
+      if (target.ok || !['row-not-rendered','row-offscreen-or-covered','frame-offscreen-or-covered'].includes(target.reason)) break;
+    } while (Date.now() < deadline);
+    target.recentered = true;
+  }
   if (target.ok) await page.mouse.move(target.x, target.y);
   return target;
 }
@@ -453,16 +469,18 @@ async function hoverEntryRow(page, opts) {
 export async function entries(page, opts = {}) {
   const limit = opts.limit ?? 12;
   if (!Number.isInteger(limit) || limit < 1) throw new TypeError('limit must be a positive integer');
+  let recentered = false;
   if (opts.reveal === true) {
     const target = await hoverEntryRow(page, opts);
-    if (!target.ok) return {entries: [], complete: false, truncated: false, reason: target.reason};
+    recentered = target.recentered === true;
+    if (!target.ok) return {entries: [], complete: false, truncated: false, recentered, reason: target.reason};
   }
   const until = Date.now() + (opts.reveal === true ? 700 : 0);
   while (true) {
     const observed = await inspect(page, opts);
     const result = entryList(observed, limit);
     if (result.entries.length || Date.now() >= until || !observed.complete) {
-      return { ...result, modeActions: observed.modeActions || [], complete: observed.complete && !result.truncated && !observed.busy,
+      return { ...result, ...(recentered ? {recentered:true} : {}), modeActions: observed.modeActions || [], complete: observed.complete && !result.truncated && !observed.busy,
         ...(observed.busy ? {reason: 'loading'} : {}), unreadFrames: observed.unreadFrames,
         scanned: observed.scannedTotal, scopeMatches: observed.scopeMatches, coverage: observed.coverage };
     }

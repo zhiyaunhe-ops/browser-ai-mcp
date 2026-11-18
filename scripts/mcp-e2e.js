@@ -87,6 +87,43 @@ if (!discovery.entries.some(item => item.kind === 'link' && item.name === 'Open 
 if (discovery.entries.some(item => item.name === 'Active')) throw new Error('green status text was misclassified as a link');
 if (!missing.entryPoints?.some(item => item.kind === 'mapping') || missing.searchScope !== 'current-view') throw new Error('missing-target discovery omitted current-view entry points');
 if (initialClicks !== '0') throw new Error('discovery clicked something automatically');
+const stickyUrl = input.url.replace('/customers', '/node-links-sticky');
+await page.goto(stickyUrl);
+const stickyBefore = await page.evaluate(() => {
+  const frame = document.querySelector('#sticky-frame');
+  const doc = frame?.contentDocument;
+  const cell = doc?.querySelector('[data-row-key="sticky-product-b"] .business-cell');
+  const header = doc?.querySelector('#sticky-head');
+  const r = cell?.getBoundingClientRect();
+  const h = header?.getBoundingClientRect();
+  const hit = r && doc.elementFromPoint((r.left+r.right)/2, (r.top+r.bottom)/2);
+  return {rowKey:cell?.closest('tr')?.dataset.rowKey, rowTop:r?.top, rowCenterY:r&&(r.top+r.bottom)/2,
+    headerBottom:h?.bottom, covered:!!header?.contains(hit), scrollTop:doc?.querySelector('#scroll-root')?.scrollTop};
+});
+if (stickyBefore.rowKey !== 'sticky-product-b' || !(stickyBefore.rowCenterY < stickyBefore.headerBottom) ||
+    !stickyBefore.covered || stickyBefore.scrollTop <= 0) throw new Error('sticky fixture did not start with the target row covered: ' + JSON.stringify(stickyBefore));
+const stickyEntries = await page.ys.entries({ rowText: 'Product B', framePath: '0/0', reveal: true });
+const stickyAfter = await page.evaluate(() => {
+  const frame = document.querySelector('#sticky-frame');
+  const doc = frame?.contentDocument;
+  const cell = doc?.querySelector('[data-row-key="sticky-product-b"] .business-cell');
+  const header = doc?.querySelector('#sticky-head');
+  const r = cell?.getBoundingClientRect();
+  const h = header?.getBoundingClientRect();
+  const hit = r && doc.elementFromPoint((r.left+r.right)/2, (r.top+r.bottom)/2);
+  return {rowKey:cell?.closest('tr')?.dataset.rowKey, rowTop:r?.top, rowCenterY:r&&(r.top+r.bottom)/2,
+    headerBottom:h?.bottom, centerClear:!!cell?.contains(hit), scrollTop:doc?.querySelector('#scroll-root')?.scrollTop,
+    clicks:doc?.querySelector('#clicks')?.textContent};
+});
+if (!stickyEntries.complete || !stickyEntries.recentered || !stickyEntries.entries.some(item =>
+    item.name === '对照表' && item.kind === 'mapping' && item.rowCells?.includes('Product B'))) {
+  throw new Error('sticky overlap did not recover the exact row action: ' + JSON.stringify({stickyEntries, stickyAfter}));
+}
+if (stickyAfter.rowKey !== 'sticky-product-b' || !stickyAfter.centerClear || stickyAfter.rowCenterY <= stickyAfter.headerBottom ||
+    stickyAfter.scrollTop >= stickyBefore.scrollTop || stickyAfter.clicks !== '0') {
+  throw new Error('sticky recovery scrolled to/clicked the wrong target: ' + JSON.stringify({stickyBefore, stickyAfter}));
+}
+await page.goto(nodeUrl);
 const hoverEntries = await page.ys.entries({ rowText: 'Product B', framePath: '0/0', reveal: true });
 if (!hoverEntries.complete || !hoverEntries.entries.some(item => item.name === '对照表' && item.rowText.includes('Product B'))) throw new Error('hover toolbar was not found in the exact row: ' + JSON.stringify(hoverEntries));
 if (await frameClicks() !== '0') throw new Error('hover reveal clicked a row action');
@@ -115,7 +152,8 @@ await page.evaluate(() => { document.querySelector('#loading-view').removeAttrib
 const absent = await page.ys.find('never present while loading', { scope: '#loading-view' });
 if (absent.reason !== 'no-match' || absent.complete !== true) throw new Error('settled empty view did not return a complete no-match: ' + JSON.stringify(absent));
 return { discovery: discovery.entries, missing: { searchScope: missing.searchScope, entryPoints: missing.entryPoints },
-  initialClicks, hoverEntries: hoverEntries.entries, hoverRowCells: hoverClick.best.rowCells, childAfterHover,
+  initialClicks, stickyBefore, stickyAfter, stickyEntries: stickyEntries.entries, stickyRecentered: stickyEntries.recentered,
+  hoverEntries: hoverEntries.entries, hoverRowCells: hoverClick.best.rowCells, childAfterHover,
   scopedRowCells: scoped.best.rowCells, childAfterAnchor, inlineRowCells: inline.best.rowCells,
   childAfterSpan, childEntries: childEntries.entries, childDetailsTitle, childDetailsReadComplete: childDetailsRead.complete,
   busyReason: busy.reason, busyComplete: busy.complete,
