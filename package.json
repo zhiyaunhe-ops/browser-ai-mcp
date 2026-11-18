@@ -1,0 +1,23 @@
+{
+  "name": "browser-ai-mcp",
+  "version": "1.0.0",
+  "description": "Browser automation through MCP and ego lite with scoped page readers, reusable procedures and saved execution evidence.",
+  "type": "commonjs",
+  "bin": {
+    "browser-ai-mcp": "src/mcp.js"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=23.4.0"
+  },
+  "scripts": {
+    "start": "node src/mcp.js",
+    "test": "node --test tests/*.test.js",
+    "test:e2e": "node scripts/mcp-e2e.js",
+    "check:docs": "node scripts/check-doc-links.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "acorn": "8.19.0",
+    "zod": "3.25.76"
+  }
+}
