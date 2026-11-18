@@ -52,16 +52,48 @@ document.querySelector('#grid').addEventListener('click', event => {
 <body><main id="loading-view" aria-busy="true"><div class="loading-mask" role="progressbar">Loading records</div><p>Current records</p></main></body></html>`);
       return;
     }
+    if (request.method === 'GET' && url.pathname === '/mode-edit') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Mode edit fixture</title></head>
+<body><main id="workspace" data-mode="browse"><p>Browse mode: row actions only include delete.</p>
+<iframe id="grid-frame" title="Mode edit row grid" src="/mode-edit-grid" style="width:900px;height:360px;border:0"></iframe></main>
+</body></html>`);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/mode-edit-grid') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Mode edit grid</title>
+<style>.row-edit-option{display:none;cursor:pointer} body[data-mode="edit"] tr:hover .row-edit-option{display:inline-block}.row-more{cursor:pointer}</style></head>
+<body data-mode="browse"><header><button type="button" btn-code="Edit" id="edit-toolbar">修改</button><output id="toolbar-clicks">0</output></header>
+<main id="grid-view"><h1>Record grid</h1><table><tbody>
+<tr data-row-key="mode-a"><td>Product A</td><td><span class="row-more row-btn-DeleteLine">删除</span><span class="row-edit-option row-btn-ViewAction">对照表</span></td></tr>
+<tr data-row-key="mode-b"><td>Product B</td><td><span class="row-more row-btn-DeleteLine">删除</span><span class="row-edit-option row-btn-ViewAction">对照表</span></td></tr>
+</tbody></table></main><script>
+document.querySelector('#edit-toolbar').addEventListener('click', () => {
+  document.body.dataset.mode = 'edit';
+  document.querySelector('#toolbar-clicks').textContent = '1';
+  parent.document.querySelector('#workspace').dataset.mode = 'edit';
+});
+document.querySelector('table').addEventListener('click', event => {
+  if (!event.target.closest('.row-btn-ViewAction')) return;
+  const key = event.target.closest('tr')?.dataset.rowKey;
+  document.querySelector('#grid-view').innerHTML = '<h1>对照表详情: ' + (key === 'mode-b' ? 'Product B' : 'Product A') + '</h1>';
+});
+</script></body></html>`);
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/yonyou-transfer') {
       const collapsed = url.searchParams.get('collapsed') === '1';
+      const mirror = url.searchParams.get('mirror') === '1';
+      const modalTransform = mirror ? 'matrix(-1,0,0,1,1200,95)' : 'matrix(1,0,0,1,164,95)';
       const rightRootClass = collapsed ? 'u-tree-treenode-close' : 'u-tree-treenode-open';
       const rightChild = collapsed
         ? '<li class="u-tree-node" fieldid="基础档案对照_node|existing-a"><span class="u-tree-checkbox u-tree-checkbox-checked"><span class="u-tree-checkbox-inner"></span></span><span class="u-tree-title">Existing mapping A</span></li><li class="u-tree-node" fieldid="基础档案对照_node|existing-b"><span class="u-tree-checkbox u-tree-checkbox-checked"><span class="u-tree-checkbox-inner"></span></span><span class="u-tree-title">Existing mapping B</span></li><li class="u-tree-node" fieldid="基础档案对照_node|existing-c"><span class="u-tree-checkbox u-tree-checkbox-checked"><span class="u-tree-checkbox-inner"></span></span><span class="u-tree-title">Existing mapping C</span></li>'
         : '';
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>Yonyou transfer fixture</title>
-<style>.u-tree{width:280px;height:260px;overflow:auto;border:1px solid #aaa;padding:8px}.u-tree ul{list-style:none;padding-left:22px}.u-tree-checkbox-inner{display:inline-block;width:14px;height:14px;border:1px solid #888}.u-tree-checkbox-checked .u-tree-checkbox-inner{background:#2468a0}.u-tree-title{padding:4px}.template-export{display:flex;gap:14px}.opr-botton{margin:12px}.opr-botton button{display:block;width:36px;height:30px;margin:8px}.u-tree-treenode-close>.u-tree-child-tree{display:none}.u-tree-switcher{display:inline-block;width:16px;height:16px}</style></head>
-<body><main id="template-export" class="template-export"><ul class="u-tree" aria-label="Source" id="source-tree" data-fieldid="来源档案值1_node"><li fieldid="基础档案对照_node" class="u-tree-node has-children u-tree-treenode-open">
+<style>.wui-modal-resizbox{position:absolute;left:0;top:0;transform-origin:top left;width:760px;min-height:360px}.template-export{display:flex;gap:14px}.u-tree{width:280px;height:260px;overflow:auto;border:1px solid #aaa;padding:8px}.u-tree ul{list-style:none;padding-left:22px}.u-tree-checkbox-inner{display:inline-block;width:14px;height:14px;border:1px solid #888}.u-tree-checkbox-checked .u-tree-checkbox-inner{background:#2468a0}.u-tree-title{padding:4px}.opr-botton{margin:12px}.opr-botton button{display:block;width:36px;height:30px;margin:8px}.u-tree-treenode-close>.u-tree-child-tree{display:none}.u-tree-switcher{display:inline-block;width:16px;height:16px}</style></head>
+<body><div id="dialog"><div class="wui-modal-resizbox react-draggable" style="transform:${modalTransform}"><main id="template-export" class="template-export"><ul class="u-tree" aria-label="Source" id="source-tree" data-fieldid="来源档案值1_node"><li fieldid="基础档案对照_node" class="u-tree-node has-children u-tree-treenode-open">
 <span class="u-tree-switcher u-tree-switcher_open"></span><span class="u-tree-title">基础档案对照_node</span><ul class="u-tree-child-tree">
 <li class="u-tree-node" fieldid="来源档案值1_node|department"><span class="u-tree-checkbox"><span class="u-tree-checkbox-inner"></span></span><span class="u-tree-title">部门级别</span></li>
 <li class="u-tree-node" fieldid="来源档案值1_node|income"><span class="u-tree-checkbox"><span class="u-tree-checkbox-inner"></span></span><span class="u-tree-title">收支项目</span></li>
@@ -70,7 +102,7 @@ document.querySelector('#grid').addEventListener('click', event => {
 <div class="opr-botton"><button type="button"><span><i class="icon iconfont icon-chuansuo-you-copy"></i></span></button></div>
 <ul class="u-tree" aria-label="Target" id="target-tree" data-fieldid="来源档案值2_node"><li fieldid="基础档案对照_node" class="u-tree-node has-children ${rightRootClass}">
 <span class="u-tree-switcher ${collapsed ? 'u-tree-switcher_close' : 'u-tree-switcher_open'}"></span><span class="u-tree-title">基础档案对照_node</span><ul class="u-tree-child-tree" id="target-items">${rightChild}</ul></li></ul></main>
-<output id="selected-moves">0</output><output id="all-moves">0</output>
+<output id="selected-moves">0</output><output id="all-moves">0</output></div></div>
 <script>
 const wrappers = document.querySelectorAll('.u-tree-checkbox');
 for (const wrapper of wrappers) wrapper.addEventListener('click', () => {

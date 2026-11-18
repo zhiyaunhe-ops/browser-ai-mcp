@@ -14,6 +14,10 @@ Start with `run_begin` and a goal, URL and observable business criteria. The fir
 3. If the row shows actions on hover, use `ys.entries({framePath,rowText,reveal:true})` with one exact cell value. Open the observed control, then check the destination record and title. Some entries open another page in `task.pages()`.
 4. If the relevant control remains unclear, inspect the native semantic `page.snapshot()`, then a visual `page.screenshot()` as needed. An incomplete scan only describes the observed view.
 
+If the correct row lacks its mapping action, inspect `modeActions` for a visible 修改 or Edit in the toolbar. When editing mode is appropriate, click the observed toolbar control without a row filter, then reveal the target row again. Use Cancel to leave temporary inspection changes.
+
+On a miss, try the next observed route. Check loading and the grid's scroll position, select or hover the row, open More, or expand a branch. Re-read the target after each action. A repeating state calls for another route or observation layer. Read both sides of a transfer before sending further input.
+
 ```js
 return await ys.click(input.entryName, {rowText: input.cellValue, framePath: input.framePath});
 ```

@@ -1,5 +1,5 @@
 // Read a scoped transfer widget and move named items using the Ego mouse API.
-export const VERSION = '2026-11-18.1';
+export const VERSION = '2026-11-18.2';
 
 function optionsFor(opts) {
   if (typeof opts?.scope !== 'string' || !opts.scope.trim()) throw new TypeError('A transfer dialog or container CSS scope is required');
@@ -192,6 +192,16 @@ function inspectTransfer({ scope, framePath, limit, target, names }) {
   }
   if (!target || reason) return state;
 
+  function axisAligned(node, allowScale) {
+    const view = node.ownerDocument.defaultView;
+    const style = view.getComputedStyle(node);
+    if (style.rotate && style.rotate !== 'none' && !/^0(?:deg|rad|turn|grad)?$/.test(style.rotate)) return false;
+    if (style.scale && style.scale !== 'none' && !style.scale.split(/\s+/).every(s => allowScale ? Number(s) > 0 : Number(s) === 1)) return false;
+    if (style.transform === 'none') return true;
+    const m = new view.DOMMatrixReadOnly(style.transform);
+    return m.is2D && Math.abs(m.b) < 0.000001 && Math.abs(m.c) < 0.000001 &&
+      (allowScale ? m.a > 0 && m.d > 0 : m.a === 1 && m.d === 1);
+  }
   const controls = [...root.querySelectorAll('button,[role="button"],input[type="button"]')].filter(el => visible(el) && !left.contains(el) && !right.contains(el));
   function selectedRight(el) {
     const labels = ['aria-label', 'title', 'data-action'].map(key => tidy(el.getAttribute(key)));
@@ -204,8 +214,7 @@ function inspectTransfer({ scope, framePath, limit, target, names }) {
       const operators = [...root.querySelectorAll('.opr-botton')].filter(visible);
       if (operators.length !== 2 || !operators.some(op => op.querySelector('.icon-chuansuo-you-copy'))) return false;
       for (let n = ncIcon; n && n !== root; n = n.parentElement) {
-        const style = doc.defaultView.getComputedStyle(n);
-        if (style.transform !== 'none' || style.scale && style.scale !== 'none' || style.rotate && style.rotate !== 'none') return false;
+        if (!axisAligned(n, true)) return false;
       }
       return true;
     }
@@ -233,7 +242,7 @@ function inspectTransfer({ scope, framePath, limit, target, names }) {
       if (x < 0 || y < 0 || x >= inner.documentElement.clientWidth || y >= inner.documentElement.clientHeight) return null;
       for (let node = frame; node; node = node.parentElement) {
         const s = parent.defaultView.getComputedStyle(node);
-        if (s.transform !== 'none' || (s.scale && s.scale !== 'none') || (s.rotate && s.rotate !== 'none') ||
+        if (!axisAligned(node, false) ||
             (s.zoom && !['normal', '1'].includes(s.zoom))) return null;
       }
       const fr = frame.getBoundingClientRect();
@@ -284,7 +293,10 @@ async function transferRight(page, names, opts) {
   const read = (target = null, selected = []) => page.evaluate(inspectTransfer, { ...config, target, names: selected });
   let state = await read();
   const result = { moved: [], alreadyRight: [], selectionClicks: [], expandedRoots: [], moveAttempted: false, verified: false, businessSaved: false };
-  const fail = reason => ({ ...result, ok: false, reason, state });
+  const fail = reason => ({ ...result, ok: false, reason, state,
+    next: result.moveAttempted
+      ? 'Read both lists again and compare with the original right-hand items before another move.'
+      : 'Inspect the current selection, expand hints and arrow in this picker. If unclear, take a scoped native snapshot, then a screenshot as needed.' });
   const success = (moved = [], sourceRetained = [], sourceRemoved = []) => ({
     ok: true, verified: true, businessSaved: false, moved, alreadyRight: result.alreadyRight,
     expandedRoots: result.expandedRoots, sourceRetained, sourceRemoved,

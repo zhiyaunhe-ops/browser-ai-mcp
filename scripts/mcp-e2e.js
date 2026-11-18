@@ -141,6 +141,75 @@ return { discovery: discovery.entries, missing: { searchScope: missing.searchSco
     assert.equal(nodeLinksExecution.result.settledReason, 'no-match');
     assert.equal(nodeLinksExecution.result.settledComplete, true);
 
+    const modeProbe = await call(client, 'browser_run', {
+      runId: run.runId, requestId: 'e2e-mode-edit-observe-1', purpose: 'observe',
+      code: `const modeUrl = input.url.replace('/customers', '/mode-edit');
+await page.goto(modeUrl);
+const found = await page.ys.find('对照表', { rowText: 'Product B', framePath: '0/0' });
+const rowEntries = await page.ys.entries({ rowText: 'Product B', framePath: '0/0' });
+const state = await page.evaluate(() => {
+  const frame = document.querySelector('#grid-frame');
+  const doc = frame?.contentDocument;
+  const row = doc?.querySelector('tr[data-row-key="mode-b"]');
+  return { parentMode: document.querySelector('#workspace')?.dataset.mode,
+    toolbarClicks: doc?.querySelector('#toolbar-clicks')?.textContent,
+    rowKey: row?.dataset.rowKey,
+    deleteVisible: getComputedStyle(row?.querySelector('.row-btn-DeleteLine'))?.display !== 'none',
+    editActionVisible: getComputedStyle(row?.querySelector('.row-btn-ViewAction'))?.display !== 'none' };
+});
+const mode = found.modeActions?.find(item => item.kind === 'edit' && item.buttonCode === 'Edit');
+if (!mode || mode.name !== '修改' || mode.framePath !== '0/0') throw new Error('observed edit mode hint missing: ' + JSON.stringify(found));
+if (!rowEntries.entries.some(item => item.name === '删除' && item.rowCells?.includes('Product B'))) throw new Error('browse-mode row did not expose its delete action');
+if (rowEntries.entries.some(item => item.name === '对照表' && item.rowCells?.includes('Product B'))) throw new Error('browse-mode row exposed the edit-only mapping action');
+if (state.parentMode !== 'browse' || state.toolbarClicks !== '0' || state.rowKey !== 'mode-b' || !state.deleteVisible || state.editActionVisible) throw new Error('read-only mode discovery clicked or misread the row: ' + JSON.stringify(state));
+return { modeActions: found.modeActions, rowEntries: rowEntries.entries, state };`,
+      args: { url: fixture.url }, timeoutMs: 60_000,
+    });
+    const modeProbeExecution = await execution(client, run.runId, modeProbe.executionId);
+    assert.equal(modeProbeExecution.state, 'succeeded', JSON.stringify(modeProbeExecution));
+    assert.ok(modeProbeExecution.result.modeActions.some(item => item.kind === 'edit' && item.buttonCode === 'Edit'));
+    assert.equal(modeProbeExecution.result.state.parentMode, 'browse');
+    assert.equal(modeProbeExecution.result.state.toolbarClicks, '0');
+    assert.equal(modeProbeExecution.result.state.deleteVisible, true);
+    assert.equal(modeProbeExecution.result.state.editActionVisible, false);
+
+    const modeEdit = await call(client, 'browser_run', {
+      runId: run.runId, requestId: 'e2e-mode-edit-execute-1', purpose: 'execute',
+      code: `const modeUrl = input.url.replace('/customers', '/mode-edit');
+await page.goto(modeUrl);
+const observed = await page.ys.find('对照表', { rowText: 'Product B', framePath: '0/0' });
+const mode = observed.modeActions?.find(item => item.kind === 'edit' && item.buttonCode === 'Edit');
+if (!mode) throw new Error('Edit mode was not observed before execution: ' + JSON.stringify(observed));
+const editClick = await page.ys.click(mode.name, { framePath: mode.framePath });
+if (!editClick.clicked) throw new Error('explicit Edit mode click failed: ' + JSON.stringify(editClick));
+const afterEdit = await page.evaluate(() => ({ parentMode: document.querySelector('#workspace')?.dataset.mode,
+  toolbarClicks: document.querySelector('#grid-frame')?.contentDocument?.querySelector('#toolbar-clicks')?.textContent }));
+if (afterEdit.parentMode !== 'edit' || afterEdit.toolbarClicks !== '1') throw new Error('Edit mode was not entered: ' + JSON.stringify(afterEdit));
+const entries = await page.ys.entries({ rowText: 'Product B', framePath: '0/0', reveal: true });
+const mappingEntry = entries.entries.find(item => item.kind === 'mapping' && item.name === '对照表' && item.rowCells?.includes('Product B'));
+if (!entries.complete || !mappingEntry) throw new Error('hover did not reveal the Product B mapping action: ' + JSON.stringify(entries));
+const opened = await page.ys.click('对照表', { rowText: 'Product B', framePath: '0/0' });
+if (!opened.clicked || !opened.best.rowCells?.includes('Product B')) throw new Error('scoped mapping action did not click the requested row: ' + JSON.stringify(opened));
+const detailTitle = await page.evaluate(() => document.querySelector('#grid-frame')?.contentDocument?.querySelector('h1')?.textContent);
+const detailRead = await page.ys.entries({ framePath: '0/0' });
+if (detailTitle !== '对照表详情: Product B' || !detailRead.complete) throw new Error('wrong detail opened or destination could not be reread: ' + JSON.stringify({ detailTitle, detailRead }));
+return { modeName: mode.name, modeFramePath: mode.framePath, clicked: editClick.clicked,
+  parentMode: afterEdit.parentMode, toolbarClicks: afterEdit.toolbarClicks,
+  mappingRowCells: mappingEntry.rowCells, openedRowCells: opened.best.rowCells,
+  detailTitle, detailReadComplete: detailRead.complete };`,
+      args: { url: fixture.url }, timeoutMs: 60_000,
+    });
+    const modeEditExecution = await execution(client, run.runId, modeEdit.executionId);
+    assert.equal(modeEditExecution.state, 'succeeded', JSON.stringify(modeEditExecution));
+    assert.equal(modeEditExecution.result.modeName, '修改');
+    assert.equal(modeEditExecution.result.modeFramePath, '0/0');
+    assert.equal(modeEditExecution.result.parentMode, 'edit');
+    assert.equal(modeEditExecution.result.toolbarClicks, '1');
+    assert.ok(modeEditExecution.result.mappingRowCells.includes('Product B'));
+    assert.ok(modeEditExecution.result.openedRowCells.includes('Product B'));
+    assert.equal(modeEditExecution.result.detailTitle, '对照表详情: Product B');
+    assert.equal(modeEditExecution.result.detailReadComplete, true);
+
     const transfer = await call(client, 'browser_run', {
       runId: run.runId, requestId: 'e2e-transfer-1', purpose: 'execute',
       code: `const transferUrl = input.url.replace('/customers', '/transfer');
@@ -195,12 +264,14 @@ return { moved: operation.moved, alreadyRight: operation.alreadyRight, verified:
       runId: run.runId, requestId: 'e2e-yonyou-transfer-1', purpose: 'execute',
       code: `const yonyouUrl = input.url.replace('/customers', '/yonyou-transfer');
 await page.goto(yonyouUrl);
-const before = await page.ys.transferState({ scope: '#template-export' });
+const translationMatrix = await page.evaluate(() => { const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.wui-modal-resizbox')).transform); return [m.a,m.b,m.c,m.d,m.e,m.f]; });
+if (JSON.stringify(translationMatrix) !== JSON.stringify([1,0,0,1,164,95])) throw new Error('translation fixture matrix differed: ' + JSON.stringify(translationMatrix));
+const before = await page.ys.transferState({ scope: '#dialog' });
 if (!before.complete) throw new Error('expanded template tree was incomplete: ' + JSON.stringify(before));
 if (before.left.items.some(item => item.name === '基础档案对照_node') || before.right.items.some(item => item.name === '基础档案对照_node')) throw new Error('duplicate folder roots were counted as movable leaves');
 if (!before.left.items.some(item => item.name === '部门级别') || !before.left.items.some(item => item.name === '收支项目')) throw new Error('template leaves were not read');
-const operation = await page.ys.transferRight(['部门级别', '收支项目'], { scope: '#template-export' });
-const after = await page.ys.transferState({ scope: '#template-export' });
+const operation = await page.ys.transferRight(['部门级别', '收支项目'], { scope: '#dialog' });
+const after = await page.ys.transferState({ scope: '#dialog' });
 const selectedMoves = await page.evaluate(() => document.querySelector('#selected-moves')?.textContent);
 const allMoves = await page.evaluate(() => document.querySelector('#all-moves')?.textContent);
 if (!operation.ok || !operation.verified || JSON.stringify(operation.moved) !== JSON.stringify(['部门级别', '收支项目'])) throw new Error('Yonyou selected transfer failed: ' + JSON.stringify(operation));
@@ -208,21 +279,36 @@ if (operation.businessSaved !== false || selectedMoves !== '1' || allMoves !== '
 if (after.right.items.length !== 2 || !after.right.items.some(item => item.name === '部门级别') || !after.right.items.some(item => item.name === '收支项目')) throw new Error('Yonyou right-side readback was not exact: ' + JSON.stringify(after.right));
 if (after.left.items.length !== 0) throw new Error('Yonyou source still contains moved leaves: ' + JSON.stringify(after.left));
 await page.goto(yonyouUrl + '?collapsed=1');
-const collapsed = await page.ys.transferState({ scope: '#template-export' });
+const collapsed = await page.ys.transferState({ scope: '#dialog' });
 if (collapsed.complete || collapsed.reason !== 'collapsed-tree' || !collapsed.right.expandHints?.some(hint => hint.canExpand)) throw new Error('collapsed right tree was reported empty or not expandable: ' + JSON.stringify(collapsed));
-const expandedMove = await page.ys.transferRight(['部门级别'], { scope: '#template-export' });
+const expandedMove = await page.ys.transferRight(['部门级别'], { scope: '#dialog' });
 if (!expandedMove.ok || !expandedMove.verified || JSON.stringify(expandedMove.moved) !== JSON.stringify(['部门级别'])) throw new Error('collapsed-root transfer did not expand and verify: ' + JSON.stringify(expandedMove));
 if (!expandedMove.expandedRoots?.some(item => item.side === 'right')) throw new Error('transfer did not record expansion of the unique right root');
-const expandedState = await page.ys.transferState({ scope: '#template-export' });
+const expandedState = await page.ys.transferState({ scope: '#dialog' });
 if (!expandedState.complete) throw new Error('expanded right tree could not be independently reread: ' + JSON.stringify(expandedState));
 const expandedRight = expandedState.right.items;
 const expandedNames = expandedRight.map(item => item.name).sort();
 if (JSON.stringify(expandedNames) !== JSON.stringify(['Existing mapping A', 'Existing mapping B', 'Existing mapping C', '部门级别'].sort())) throw new Error('collapsed right-side readback lost existing entries: ' + JSON.stringify(expandedNames));
 const collapsedCounts = await page.evaluate(() => ({ selected: document.querySelector('#selected-moves')?.textContent, all: document.querySelector('#all-moves')?.textContent }));
 if (collapsedCounts.selected !== '1' || collapsedCounts.all !== '0') throw new Error('collapsed transfer used a bulk or repeated action: ' + JSON.stringify(collapsedCounts));
-return { moved: operation.moved, selectedMoves, allMoves, targetNames: after.right.items.map(item => item.name),
+await page.goto(yonyouUrl + '?mirror=1');
+const mirrorMatrix = await page.evaluate(() => { const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.wui-modal-resizbox')).transform); return [m.a,m.b,m.c,m.d,m.e,m.f]; });
+if (JSON.stringify(mirrorMatrix) !== JSON.stringify([-1,0,0,1,1200,95])) throw new Error('mirror fixture matrix differed: ' + JSON.stringify(mirrorMatrix));
+const beforeMirror = await page.ys.transferState({ scope: '#dialog' });
+if (!beforeMirror.complete) throw new Error('mirrored transfer fixture state incomplete: ' + JSON.stringify(beforeMirror));
+const mirrorOperation = await page.ys.transferRight(['部门级别', '收支项目'], { scope: '#dialog' });
+const afterMirror = await page.ys.transferState({ scope: '#dialog' });
+const mirrorCounts = await page.evaluate(() => ({ selected: document.querySelector('#selected-moves')?.textContent, all: document.querySelector('#all-moves')?.textContent }));
+const mirrorSourceBefore = beforeMirror.left.items.map(item => item.name).sort();
+const mirrorSourceAfter = afterMirror.left.items.map(item => item.name).sort();
+if (mirrorOperation.ok || mirrorOperation.moveAttempted || mirrorOperation.reason !== 'missing-move-selected-right') throw new Error('mirrored direction was accepted or not explicitly rejected: ' + JSON.stringify(mirrorOperation));
+if (JSON.stringify(mirrorSourceAfter) !== JSON.stringify(mirrorSourceBefore) || afterMirror.right.items.length !== 0) throw new Error('mirrored refusal changed either list');
+if (mirrorCounts.selected !== '0' || mirrorCounts.all !== '0') throw new Error('mirrored refusal triggered a move control: ' + JSON.stringify(mirrorCounts));
+return { translationMatrix, moved: operation.moved, selectedMoves, allMoves, targetNames: after.right.items.map(item => item.name),
   collapsedReason: collapsed.reason, expandHints: collapsed.right.expandHints, expandedRoots: expandedMove.expandedRoots,
-  expandedMoved: expandedMove.moved, expandedRight: expandedNames, collapsedCounts };`,
+  expandedMoved: expandedMove.moved, expandedRight: expandedNames, collapsedCounts,
+  mirrorMatrix, mirrorReason: mirrorOperation.reason, mirrorMoveAttempted: mirrorOperation.moveAttempted,
+  mirrorSourceBefore, mirrorSourceAfter, mirrorRightCount: afterMirror.right.items.length, mirrorCounts };`,
       args: { url: fixture.url }, timeoutMs: 60_000,
     });
     const yonyouTransferExecution = await execution(client, run.runId, yonyouTransfer.executionId);
@@ -236,6 +322,13 @@ return { moved: operation.moved, selectedMoves, allMoves, targetNames: after.rig
     assert.deepEqual(yonyouTransferExecution.result.expandedRight,
       ['Existing mapping A', 'Existing mapping B', 'Existing mapping C', '部门级别']);
     assert.deepEqual(yonyouTransferExecution.result.collapsedCounts, { selected: '1', all: '0' });
+    assert.deepEqual(yonyouTransferExecution.result.translationMatrix, [1, 0, 0, 1, 164, 95]);
+    assert.deepEqual(yonyouTransferExecution.result.mirrorMatrix, [-1, 0, 0, 1, 1200, 95]);
+    assert.equal(yonyouTransferExecution.result.mirrorReason, 'missing-move-selected-right');
+    assert.equal(yonyouTransferExecution.result.mirrorMoveAttempted, false);
+    assert.deepEqual(yonyouTransferExecution.result.mirrorSourceAfter, yonyouTransferExecution.result.mirrorSourceBefore);
+    assert.equal(yonyouTransferExecution.result.mirrorRightCount, 0);
+    assert.deepEqual(yonyouTransferExecution.result.mirrorCounts, { selected: '0', all: '0' });
 
     const write = await call(client, 'browser_run', {
       runId: run.runId, requestId: 'e2e-execute-1', purpose: 'execute',
@@ -299,7 +392,8 @@ return { customer: customer.customer };`,
 
     process.stdout.write(JSON.stringify({
       result: 'PASS', runId: run.runId, spaceId: initialExecution.spaceId,
-      executions: [initialExecution.executionId, nodeLinksExecution.executionId, transferExecution.executionId, yonyouTransferExecution.executionId,
+      executions: [initialExecution.executionId, nodeLinksExecution.executionId, modeProbeExecution.executionId,
+        modeEditExecution.executionId, transferExecution.executionId, yonyouTransferExecution.executionId,
         writeExecution.executionId, verificationExecution.executionId],
       verificationObservationId: verificationExecution.observationId,
       memoryId: memory.id, cleanup: finished.cleanup.state,

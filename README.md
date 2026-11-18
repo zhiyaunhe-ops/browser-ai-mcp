@@ -21,8 +21,11 @@ npm ci
 | 找不到业务节点 | 先读父页面。检查 `ys.find()` 返回的 `entryPoints`，或用 `ys.entries({framePath,scope})` 找对照表按钮、行内链接和展开控件。 |
 | 多行都有同名入口 | 用 `ys.click(name,{rowText,framePath})` 指定该行一个单元格的完整值，再读新页面、弹窗或标签页的标题与业务字段。 |
 | 操作栏只在鼠标移入行后出现 | 用 `ys.entries({rowText,framePath,reveal:true})` 移到指定行并读取出现的入口。 |
+| 找到正确行却只有「删除」 | 查看 `modeActions` 中实际可见的「修改」。需要进入编辑态时，先点页顶「修改」，再读同一行的「对照表」。 |
 | 选择多条后统一右移 | 用 `ys.transferState({scope,framePath})` 看左右明细和勾选状态，再用 `ys.transferRight(names,{scope,framePath})` 移动这一批。它核对右侧原有和新增条目。 |
 | 可见信息不足 | Agent 先读用友语义层，再按需要使用 ego 原生语义快照 `page.snapshot()`，最后才取视觉截图 `page.screenshot()`。 |
+
+第一次没找到时，Agent 会根据页面上可见的线索继续尝试。它可以等候加载、滚动表格、选中或悬停目标行、展开「更多」或进入编辑态。每一步重新读取目标记录，右移后先核对两侧明细再决定下一步。
 
 `scope` 是现场观察到的 CSS 选择器。`framePath` 是适配器返回的同源框架路径。适配器读取当前渲染的普通 DOM，跨域框架、Shadow DOM 或虚拟列表可能需要进一步观察。穿梭框右栏变更后，业务单据仍需按任务要求确认、保存并复查。
 

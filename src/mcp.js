@@ -35,7 +35,7 @@ function createMcpServer(service = createService()) {
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
   }, args => service.begin(args));
-  register('browser_run', 'Execute an ego-browser script with task, page and input; DOM globals belong in page.evaluate(). Rejects known SDK/context mistakes before dispatch. Return JSON and poll run_get. If a node is missing in this view, inspect ys.entries() for mapping buttons and row links, open the observed entry and read again. For a two-pane picker, read ys.transferState and batch selected names with ys.transferRight. Installs memo, scoped ys readers and bounded per-round observationTrace by default; memo:false opts out. Business completion requires a later independent observe round and run_finish.', {
+  register('browser_run', 'Execute ego code with task, page and input. Return JSON and poll run_get. On a missing Yonyou node, try observed row, hover, More and edit-mode entrances from ys.entries() and modeActions. Re-read after each attempt. Use ys.transferState/transferRight for two-pane pickers. Includes memo, scoped readers and observationTrace by default. DOM globals belong in page.evaluate(). Business completion requires a later independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
     args: z.unknown().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     pageLabel: text.optional(), resumeAfterUserAction: z.boolean().optional(), memo: z.boolean().optional(),

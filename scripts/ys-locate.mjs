@@ -17,7 +17,7 @@
 
 import { BUSY } from './ys-page.mjs';
 
-export const VERSION = "2026-11-18.2";
+export const VERSION = "2026-11-18.3";
 
 // 精确名才算「强匹配」：前缀/包含/同义词都算模糊，click 默认拒绝。
 export const STRONG = 1;
@@ -54,6 +54,7 @@ const SPECIFIC_SELECTORS = [
   "[role=radio]",
   "[fieldid]",
   "[data-fieldid]",
+  "[btn-code]",
   ".wui-btn",
   ".wui-button",
   ".btn",
@@ -165,7 +166,7 @@ export async function inspect(page, opts = {}) {
     const out = [];
     const seen = new Set();
     const hitIds = new WeakMap();
-    const unreadFrames = [];
+    const unreadFrames = [], modeActions = [];
     let nextHitId = 1, documents = 0, selectedDocuments = 0, scopeMatches = 0, limitReached = false, busy = false;
     const specificSelector = specific.join(',');
     const genericSelector = generic.join(',');
@@ -232,6 +233,24 @@ export async function inspect(page, opts = {}) {
           const actualFieldid = el.getAttribute('fieldid') || el.getAttribute('data-fieldid') || '';
           if (fieldid && actualFieldid !== fieldid && !actualFieldid.endsWith('|' + fieldid)) continue;
           const rowNode = el.closest(rowSelector);
+          if (!rowNode && modeActions.length < 8) {
+            const code = el.getAttribute('btn-code') || '';
+            const namedEdit = /^(?:edit|modify|btnEdit)$/i.test(code || actualFieldid.split('|').pop() || '');
+            if (namedEdit || el.matches('button,[role="button"]') && el.closest('[role="toolbar"]')) {
+              const name = tidy(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText);
+              if ((namedEdit || /^(?:修改|编辑|編輯|edit|modify)$/i.test(name)) && name && name.length <= 40 &&
+                  !el.matches(':disabled') && !el.closest('[aria-disabled="true"],[inert]')) {
+                const box = visible(el, doc.defaultView);
+                if (box) {
+                  const px = box.left + box.width / 2, py = box.top + box.height / 2;
+                  const hit = doc.elementFromPoint(px, py);
+                  if ((hit === el || el.contains(hit)) && ancestors.every(a => a.doc.elementFromPoint(dx + px - a.dx, dy + py - a.dy) === a.frame)) {
+                    modeActions.push({kind:'edit', name, framePath, buttonCode:code, fieldid:actualFieldid});
+                  }
+                }
+              }
+            }
+          }
           if (rowText && !rowOf(rowNode)?.cells.includes(rowText)) continue;
           const isSpecific = el.tagName === 'BUTTON' || Boolean(actualFieldid) || el.matches(specificSelector);
           const rowAction = el.matches(rowActionSelector);
@@ -333,7 +352,7 @@ export async function inspect(page, opts = {}) {
     };
     walk(document, 0, 0, 0, { left: 0, top: 0, right: innerWidth, bottom: innerHeight }, [], '0');
     return { url: document.URL || '', items: out, scannedTotal: out.length, limitReached, elementLimit: limit,
-      documents, selectedDocuments, scopeMatches, unreadFrames, busy,
+      documents, selectedDocuments, scopeMatches, unreadFrames, busy, modeActions,
       complete: !limitReached && unreadFrames.length === 0 && selectedDocuments > 0 && scopeMatches > 0,
       coverage: 'same-origin-light-dom', shadowDOM: 'not-traversed' };
   }, [SPECIFIC_SELECTORS, GENERIC_SELECTORS, cap, opts.scope || null,
@@ -443,7 +462,7 @@ export async function entries(page, opts = {}) {
     const observed = await inspect(page, opts);
     const result = entryList(observed, limit);
     if (result.entries.length || Date.now() >= until || !observed.complete) {
-      return { ...result, complete: observed.complete && !result.truncated && !observed.busy,
+      return { ...result, modeActions: observed.modeActions || [], complete: observed.complete && !result.truncated && !observed.busy,
         ...(observed.busy ? {reason: 'loading'} : {}), unreadFrames: observed.unreadFrames,
         scanned: observed.scannedTotal, scopeMatches: observed.scopeMatches, coverage: observed.coverage };
     }
@@ -473,9 +492,10 @@ export async function find(page, query, opts = {}) {
   return {
     ok: Boolean(best) && !incomplete && !loading, reason, strong, best,
     candidates: ranked.slice(0, Math.max(2, opts.limit || 8)),
-    ...(reason !== 'ok' ? { entryPoints: entryList(observation, 8).entries, searchScope: 'current-view',
+    ...(reason !== 'ok' ? { entryPoints: entryList(observation, 8).entries, modeActions: observation.modeActions || [], searchScope: 'current-view',
       next: loading ? 'Wait for the requested data to load, then read the same view again.'
-        : 'Inspect ys.entries() in the relevant row/frame; open the observed entry and read the destination.' } : {}),
+        : observation.modeActions?.length && opts.rowText ? 'An Edit toolbar action is visible. To inspect editing-mode row actions, enter Edit, then reveal and read the same row again.'
+        : 'Check the actual grid position, reveal the row, and inspect its entries or More menu. Read after each change; use a native snapshot then a screenshot if needed.' } : {}),
     scanned: all.length, truncated, complete: observation.complete && !loading,
     coverage: { mode: observation.coverage, documents: observation.documents,
       unreadFrames: observation.unreadFrames, scopeMatches: observation.scopeMatches },
