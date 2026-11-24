@@ -17,7 +17,7 @@ const formula = z.union([text, z.object({ expression: text, display: z.string().
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: 'Recall a procedure with run_begin, use browser_run for official ego code, poll run_get, then independently observe business results before run_finish. Browser code receives task, page and input. Use ego-browser documented methods; run_finish owns Space cleanup. Never resend an unresolved write with a new requestId.'
+    instructions: 'ASP UAT 通用报销单的表头字段配置使用 asp_ui_template_update_field。给出模板名和字段名即可。changes={} 可读取该字段实际提供的属性。For other browser workflows recall a procedure with run_begin, use browser_run for official ego code, poll run_get, then independently observe business results before run_finish. Browser code receives task, page and input. Use ego-browser documented methods; run_finish owns Space cleanup. Never resend an unresolved write with a new requestId.'
   });
   const register = (name, description, inputSchema, method) => server.registerTool(name, {
     description, inputSchema, outputSchema: output
@@ -34,12 +34,13 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
-  register('asp_ui_template_update_field', 'Update ordinary properties and the calculation formula of an ASP UAT PC general reimbursement header field. Provide the exact template name or ID and the field label or code. Supply designerUrl with templateId for click-free access. Pass an empty changes object to inspect the property codes. Reuse requestId when resuming.', {
+  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 通用报销单表头字段。给出模板名或 ID、字段名或编码。支持必填、显示、允许修改、标题、公式，以及该字段开放的默认值、提示文本、布局占比、输入长度、金额精度、取值范围等属性。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
     requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     designerUrl: z.string().url().optional(), field: text,
     changes: z.object({
       required: z.boolean().optional(), visible: z.boolean().optional(), editable: z.boolean().optional(),
-      caption: text.optional(), formula: formula.optional(), properties: z.record(z.unknown()).optional()
+      caption: text.optional(), formula: formula.optional().describe('计算公式表达式或带 display 的对象。null 清空公式。'),
+      properties: z.record(z.unknown()).optional().describe('键为该字段的属性编码或面板上的精确名称，值按设计器元数据填写。下拉选项使用其 value。')
     }).strict()
   }, args => updateTemplateField(service, args));
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {

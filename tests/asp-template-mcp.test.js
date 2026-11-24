@@ -10,16 +10,18 @@ const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { createMcpServer } = require('../src/mcp');
 const { createService } = require('../src/service');
 
-async function setup(t, { required = false, ambiguous = false } = {}) {
+async function setup(t, { required = false, ambiguous = false, properties } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'asp-template-test-'));
   let next = 0;
   const calls = [];
   const identity = { templateId: 'template-1', templateName: 'General', transactionType: 'Travel', field: 'department', fieldName: 'Department' };
   const adapter = {
     async run(options) {
-      const step = options.code.match(/workflow\.(locate|update|verify)\(/)[1];
+      const step = options.code.match(/workflow\.(locateModel|updateModel|verifyModel|locate|update|verify)\(/)[1];
       calls.push({ step, purpose: options.purpose });
       let result;
+      if (step === 'locateModel') result = { ...identity, nid: 'node-1', designerUrl: 'https://example.test/designer', pageLabel: 'p1', properties, matches: true };
+      if (step === 'verifyModel') result = { ...identity, nid: 'node-1', properties, matches: true };
       if (step === 'locate') result = ambiguous
         ? { status: 'ambiguous_template', candidates: [{ templateId: 'template-1' }, { templateId: 'template-2' }] }
         : { ...identity, required, designerUrl: 'https://example.test/designer', pageLabel: 'p1' };
@@ -79,4 +81,28 @@ test('MCP returns candidates and does not write when the target is ambiguous', a
   assert.equal(result.status, 'ambiguous_template');
   assert.equal(result.candidates.length, 2);
   assert.deepEqual(calls.map(call => call.step), ['locate']);
+});
+
+test('MCP requires the dedicated formula parameter and performs no write for properties.formula', async t => {
+  const { client, calls } = await setup(t);
+  const response = await client.callTool({ name: 'asp_ui_template_update_field', arguments: {
+    ...args, changes: { properties: { formula: '1 + 1' } },
+  } });
+  assert.equal(response.isError, true);
+  assert.match(response.structuredContent.data.message, /changes\.formula/);
+  assert.deepEqual(calls, []);
+});
+
+
+test('MCP inspect returns the complete large property list without a write', async t => {
+  const properties = Array.from({ length: 250 }, (_, index) => ({
+    code: `property-${index}`, name: `属性 ${index}`, value: 'x'.repeat(80), disabled: false,
+  }));
+  const { client, calls } = await setup(t, { properties });
+  const response = await client.callTool({ name: 'asp_ui_template_update_field', arguments: { ...args, changes: {} } });
+  assert.notEqual(response.isError, true, JSON.stringify(response.structuredContent));
+  const result = response.structuredContent.data;
+  assert.equal(result.status, 'inspected');
+  assert.deepEqual(result.properties, properties);
+  assert.deepEqual(calls.map(call => call.step), ['locateModel', 'verifyModel']);
 });

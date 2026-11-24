@@ -124,6 +124,31 @@ async function designerModel(input) {
     return false;
   }
 
+  const meta = props.innerCompMeta;
+  const referConfig = meta.getProp('UI#referConfig');
+  // The reference dialog owns this setting. Its code is exposed by the native action.
+  const referenceType = referConfig && tools.get('ai.elem.setRefType') && {
+    code: 'cRefType', name: '参照编码', controlType: 'string', isNormal: true,
+    disabled: referConfig.disabled, visible: referConfig.visible,
+  };
+  const properties = referenceType && !meta.getProp(referenceType.code)
+    ? [...meta.normalProps, referenceType]
+    : meta.normalProps;
+  const getProp = key => meta.getProp(key) ?? (key === referenceType?.code ? referenceType : undefined);
+  const actions = {
+    formula: ['ai.elem.setFormula', value => value === null ? {} : { formula: value.expression, formulaDisplay: value.display }],
+    'UI#cShowCaption': ['ai.elem.setCaption', value => ({ caption: value })],
+    cDefaultValue: ['ai.elem.setDefaultValue', value => ({ cDefaultValue: value })],
+    cEnumType: ['ai.elem.setEnumType', value => ({ cEnumType: value })],
+    cRefType: ['ai.elem.setRefType', value => ({ cRefType: value })],
+  };
+  const canEdit = prop => {
+    if (!prop.isNormal || prop.disabled) return false;
+    if (prop.code === 'cRefType' && window.yyds.getReferCanNotEditReferType?.(matches[0])) return false;
+    if (Object.hasOwn(actions, prop.code)) return Boolean(tools.get(actions[prop.code][0]));
+    return prop.controlType !== 'IframeModal';
+  };
+  const isReference = ['refer', 'treerefer', 'listrefer', 'multirefer'].includes(matches[0].uitype);
   const read = key => {
     const node = window.yyds.getNodeByNid(nid);
     if (key === 'formula') {
@@ -131,17 +156,39 @@ async function designerModel(input) {
         ? { expression: node.formula, display: node.formulaDisplay ?? '' }
         : null;
     }
-    if (key === 'cEnumType' || key === 'cRefType') return node[key] ?? null;
+    if (key === 'cDefaultValue' && isReference && node.cRefDefaultValue) return JSON.parse(node.cRefDefaultValue);
+    if (['cDefaultValue', 'cEnumType', 'cRefType'].includes(key)) return node[key] ?? null;
     return props.innerCompMeta.getProp(key)?.value ?? null;
   };
-  const entries = Object.entries(input.desired);
-  if (!entries.length) {
-    const properties = props.innerCompMeta.normalProps.map(prop => ({
-      code: prop.code, name: prop.name, type: prop.controlType, disabled: prop.disabled, value: read(prop.code)
-    }));
-    return { ...identity, properties, matches: true };
+  if (!Object.keys(input.desired).length) {
+    const describe = prop => {
+      const { code, name, controlType: type, visible } = prop;
+      const result = { code, name, type, visible, disabled: !canEdit(prop), value: read(code) };
+      if (type === 'Select' || type === 'Radio') {
+        const source = type === 'Select' && Array.isArray(prop.data) && prop.data.length ? prop.data : prop.options;
+        if (Array.isArray(source)) result.options = source.filter(option => type !== 'Select' || option?.visible !== false)
+          .map(option => option && typeof option === 'object'
+            ? { value: option[prop.valueKey || 'value'], label: option[prop.labelKey || 'label'] ?? option.text }
+            : { value: option });
+      }
+      return result;
+    };
+    return { ...identity, properties: properties.map(describe), matches: true };
   }
-  const snapshot = () => Object.fromEntries(entries.map(([key]) => [key, read(key)]));
+  const desired = new Map();
+  for (const [key, value] of Object.entries(input.desired)) {
+    let prop = getProp(key);
+    if (!prop) {
+      const named = properties.filter(item => item.name === key);
+      if (named.length > 1) throw new Error('Ambiguous field property name: ' + key + ' (' + named.map(item => item.code).join(', ') + ')');
+      [prop] = named;
+    }
+    if (!prop) throw new Error('Field property is unavailable: ' + key);
+    if (prop.code === 'formula' && key !== 'formula') throw new Error('Use changes.formula to set or clear a calculation formula');
+    if (desired.has(prop.code)) throw new Error('Supply field property ' + prop.code + ' once');
+    desired.set(prop.code, value);
+  }
+  const snapshot = () => Object.fromEntries([...desired.keys()].map(key => [key, read(key)]));
   const same = (value, expected) => {
     if (Array.isArray(expected)) {
       return Array.isArray(value) && value.length === expected.length && expected.every((v, i) => same(value[i], v));
@@ -152,20 +199,30 @@ async function designerModel(input) {
     }
     return value === expected;
   };
-  for (const [key] of entries) {
-    if (!props.innerCompMeta.getProp(key)) throw new Error('Field property is unavailable: ' + key);
-  }
-  const before = snapshot();
-  const pending = entries.filter(([key, value]) => !same(before[key], value));
-  if (!input.write || !pending.length) return { ...identity, values: before, matches: !pending.length, changed: false };
-
-  const actions = {
-    formula: ['ai.elem.setFormula', value => value === null ? {} : { formula: value.expression, formulaDisplay: value.display }],
-    'UI#cShowCaption': ['ai.elem.setCaption', value => ({ caption: value })],
-    cDefaultValue: ['ai.elem.setDefaultValue', value => ({ cDefaultValue: value })],
-    cEnumType: ['ai.elem.setEnumType', value => ({ cEnumType: value })],
-    cRefType: ['ai.elem.setRefType', value => ({ cRefType: value })],
+  // The default-value action stores dates and multi-select values in its protocol format.
+  const expected = (key, value) => {
+    if (key !== 'cDefaultValue') return value;
+    if (value === null || value === '') return null;
+    const node = window.yyds.getNodeByNid(nid);
+    if (node.uitype === 'datepicker') {
+      if (node.cFormatData === 'YYYY') return value + '-01-01';
+      if (node.cFormatData === 'YYYY-MM') return value + '-01';
+    }
+    if (node.uitype === 'datetimepicker' && node.cFormatData === 'YYYY-MM-DD HH:mm') return value + ':00';
+    if (Array.isArray(value) && ['select', 'radio', 'booleanoption'].includes(node.uitype)) return value.join(',');
+    if (isReference && value && typeof value === 'object' && !Array.isArray(value)) {
+      const { children, ...record } = value;
+      return Object.keys(record).length ? record : null;
+    }
+    return value;
   };
+  const before = snapshot();
+  const pending = [...desired].filter(([key, value]) => !same(before[key], expected(key, value)));
+  if (!input.write || !pending.length) return { ...identity, values: before, matches: !pending.length, changed: false };
+  // Other changes can reset defaults. Apply an explicitly supplied default last.
+  const otherChanges = pending.filter(([key]) => key !== 'cDefaultValue');
+  const updates = desired.has('cDefaultValue') ? [...otherChanges, ['cDefaultValue', desired.get('cDefaultValue')]] : otherChanges;
+
   const execute = async (name, args) => {
     const action = tools.get(name)?.tool;
     if (!action) throw new Error('Designer action is unavailable: ' + name);
@@ -173,13 +230,13 @@ async function designerModel(input) {
     if (typeof result === 'string') throw new Error(name + ': ' + result);
     return result;
   };
-  for (const [key] of pending) {
-    const prop = props.innerCompMeta.getProp(key);
-    if (!prop || !prop.isNormal || prop.disabled) throw new Error('Field property is unavailable for editing: ' + key);
+  for (const [key] of updates) {
+    if (!canEdit(getProp(key))) throw new Error('Field property is unavailable for editing: ' + key);
   }
   if (scene.viewNoSave) throw new Error('The designer has unsaved changes');
 
-  for (const [key, value] of pending) {
+  for (const [key, value] of updates) {
+    if (same(read(key), expected(key, value))) continue;
     const [name, args] = Object.hasOwn(actions, key)
       ? actions[key]
       : ['ai.elem.set', propValue => ({ propName: key, propValue })];
@@ -187,7 +244,7 @@ async function designerModel(input) {
     if (result?.nid !== nid) throw new Error('The designer did not confirm the change to ' + key);
   }
   const staged = snapshot();
-  if (entries.some(([key, value]) => !same(staged[key], value))) {
+  if ([...desired].some(([key, value]) => !same(staged[key], expected(key, value)))) {
     throw new Error('The designer staged different values: ' + JSON.stringify(staged));
   }
   const saved = await execute('ai.page.save', {});

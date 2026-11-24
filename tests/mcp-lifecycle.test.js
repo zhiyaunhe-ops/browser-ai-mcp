@@ -69,7 +69,14 @@ test('MCP exposes nine tools and completes a verified memory workflow with idemp
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
   const client = await withMcp(t, service);
 
+  assert.match(client.getInstructions(), /asp_ui_template_update_field/);
   const listed = await client.listTools();
+  const templateTool = listed.tools.find(item => item.name === 'asp_ui_template_update_field');
+  assert.match(templateTool.description, /changes=\{\}/);
+  assert.match(templateTool.description, /changes\.properties/);
+  assert.match(templateTool.description, /changes\.formula/);
+  assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
+  assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
     'asp_ui_template_update_field', 'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
   ]);
@@ -447,4 +454,18 @@ test('page memos match trusted page context across rounds and appear in finish f
     outcome: 'failed', decision: 'no-change', note: 'Observed page rules.' } })).structuredContent.data;
   assert.ok(finished.feedback.recalledMemoryIds.includes(id));
   for (const excluded of [stale, wrongPath, wrongHash, foreign]) assert.ok(!finished.feedback.recalledMemoryIds.includes(excluded));
+});
+
+
+test('run_begin recalls with at most 500 goal characters while preserving the full goal', async t => {
+  const dataDir = temporaryDirectory();
+  const service = createService({ dataDir, idFactory: identifiers() });
+  t.after(() => { service.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  const searches = [];
+  service.memory.search = query => { searches.push(query); return []; };
+  const goal = 'x'.repeat(650);
+  const run = service.begin({ requestId: 'long-goal', goal, url: 'https://example.test/', criteria: [] });
+  assert.equal(searches[0].goal, goal.slice(0, 500));
+  assert.equal(run.goal, goal);
+  assert.equal(service.run(run.runId).goal, goal);
 });

@@ -9,17 +9,23 @@ const target = {
 };
 const savePath = '/iuap-yonbuilder-designer/iuap-front/ide/module/ext';
 
-function designerPage({ required = false, title = 'Expense', nodeId = target.nid, events = [] } = {}) {
+function designerPage({ required = false, title = 'Expense', nodeId = target.nid, events = [], properties, nodeAttributes = {} } = {}) {
   const actions = [];
   const node = {
     nid: nodeId, uiTable: 'BillItemBase', entityCode: 'znbzbx_expensebill',
-    iTplId: target.templateId, cItemName: target.field, cShowCaption: 'Department',
+    iTplId: target.templateId, cItemName: target.field, cShowCaption: 'Department', ...nodeAttributes,
   };
-  const prop = { code: 'UI#required', value: required, isNormal: true, disabled: false };
+  const prop = { code: 'UI#required', name: '必填', value: required, isNormal: true, disabled: false };
+  const normalProps = properties || [prop];
   const tools = new Map([
     ['ai.elem.set', { tool: { async execute(args) {
       actions.push(['ai.elem.set', args]);
-      prop.value = args.propValue;
+      normalProps.find(item => item.code === args.propName).value = args.propValue;
+      return { nid: args.nid };
+    } } }],
+    ['ai.elem.setDefaultValue', { tool: { async execute(args) {
+      actions.push(['ai.elem.setDefaultValue', args]);
+      node.cDefaultValue = Array.isArray(args.cDefaultValue) ? args.cDefaultValue.join(',') : args.cDefaultValue + '-01';
       return { nid: args.nid };
     } } }],
     ['ai.page.save', { tool: { async execute(args) {
@@ -32,7 +38,7 @@ function designerPage({ required = false, title = 'Expense', nodeId = target.nid
     aiPageSave() {},
     propSettingModel: {
       innerTplNode: node,
-      innerCompMeta: { getProp: key => key === prop.code ? prop : undefined },
+      innerCompMeta: { normalProps, getProp: key => normalProps.find(item => item.code === key) },
     },
   };
   const window = {
@@ -44,6 +50,7 @@ function designerPage({ required = false, title = 'Expense', nodeId = target.nid
   };
   const page = {
     async url() { return designerUrl; },
+    async goto() {},
     async cdp() {},
     async events() { return events; },
     async evaluate(fn, arg) {
@@ -115,4 +122,63 @@ test('a save response for another template is not attributed to the target', asy
   const result = await update({}, page, { ...target, desired: true });
   assert.equal(result.changed, true);
   assert.equal(result.savePost, undefined);
+});
+
+
+test('designer resolves exact property names and codes to canonical readback', async () => {
+  const { updateModel, verifyModel } = await import('../scripts/asp-template.mjs');
+  const properties = [
+    { code: 'cTips', name: '提示文本', value: 'old', isNormal: true, disabled: false },
+    { code: 'iWidth', name: '布局占比', value: 1, isNormal: true, disabled: false },
+  ];
+  const { page, actions } = designerPage({ properties });
+  const desired = { '提示文本': 'new', iWidth: 2 };
+  await updateModel({}, page, { ...target, desired });
+  const actual = await verifyModel({ newPage: async () => page }, page, { ...target, desired });
+  assert.deepEqual(actual.values, { cTips: 'new', iWidth: 2 });
+  assert.equal(actual.matches, true);
+  assert.deepEqual(actions.map(([name]) => name), ['ai.elem.set', 'ai.elem.set', 'ai.page.save']);
+});
+
+test('designer rejects unknown, ambiguous and duplicate property names without writing', async () => {
+  const { updateModel } = await import('../scripts/asp-template.mjs');
+  for (const desired of [{ '不存在': true }, { '重复': true }, { '提示文本': 'a', cTips: 'b' }]) {
+    const properties = [
+      { code: 'cTips', name: '提示文本', value: '', isNormal: true, disabled: false },
+      { code: 'a', name: '重复', value: false, isNormal: true, disabled: false },
+      { code: 'b', name: '重复', value: false, isNormal: true, disabled: false },
+    ];
+    const { page, actions } = designerPage({ properties });
+    await assert.rejects(updateModel({}, page, { ...target, desired }));
+    assert.deepEqual(actions, []);
+  }
+});
+
+test('inspect exposes actual selectable options from designer metadata', async () => {
+  const { verifyModel } = await import('../scripts/asp-template.mjs');
+  const properties = [{
+    code: 'iWidth', name: '布局占比', value: 2, isNormal: true, disabled: false, controlType: 'Select',
+    data: [{ value: 2, label: '占用二列' }, { value: 3, label: '隐藏选项', visible: false }],
+  }];
+  const { page } = designerPage({ properties });
+  const actual = await verifyModel({ newPage: async () => page }, page, { ...target, desired: {} });
+  assert.deepEqual(actual.properties[0].options, [{ value: 2, label: '占用二列' }]);
+});
+
+
+test('default values verify against the designer native date and multi-select storage', async () => {
+  const { updateModel, verifyModel } = await import('../scripts/asp-template.mjs');
+  for (const [nodeAttributes, value, stored] of [
+    [{ uitype: 'datepicker', cFormatData: 'YYYY-MM' }, '2026-11', '2026-11-01'],
+    [{ uitype: 'select' }, ['a', 'b'], 'a,b'],
+  ]) {
+    const properties = [{ code: 'cDefaultValue', name: '默认值', value: null, isNormal: true, disabled: false }];
+    const { page, actions } = designerPage({ properties, nodeAttributes });
+    const desired = { cDefaultValue: value };
+    assert.equal((await updateModel({}, page, { ...target, desired })).changed, true);
+    const actual = await verifyModel({ newPage: async () => page }, page, { ...target, desired });
+    assert.equal(actual.matches, true);
+    assert.equal(actual.values.cDefaultValue, stored);
+    assert.deepEqual(actions.map(([name]) => name), ['ai.elem.setDefaultValue', 'ai.page.save']);
+  }
 });

@@ -98,7 +98,7 @@ class BrowserService {
       const criteria = args.criteria || [];
       if (!Array.isArray(criteria) || criteria.some(c => !c || typeof c.id !== 'string' || typeof c.path !== 'string' || !Object.hasOwn(c, 'equals')) ||
         new Set(criteria.map(c => c.id)).size !== criteria.length) throw problem('INVALID_ARGUMENT', 'criteria require unique id, path and equals');
-      const recalledMemory = this.memory.search({ url: url.href, goal: args.goal });
+      const recalledMemory = this.memory.search({ url: url.href, goal: args.goal.slice(0, 500) });
       for (const memoryId of args.recipeIds || []) this.memory.get(memoryId);
       const runId = this.id();
       const run = { runId, goal: args.goal, url: url.href, criteria: json(criteria),

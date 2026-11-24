@@ -58,6 +58,11 @@ async function updateTemplateField(service, input) {
       const state = await service.get({ runId, executionId: execution.executionId, limit: 1 });
       execution = state.executions[0];
     }
+    // The public execution view shortens large results. Field inspection needs
+    // the full catalog, including options for every property on this control.
+    if (execution.result?.truncated === true) {
+      return service.store.get('execution', execution.executionId);
+    }
     return execution;
   }
   const finish = (outcome, note, verification = []) => service.finish({ runId, requestId: 'finish-' + outcome,
