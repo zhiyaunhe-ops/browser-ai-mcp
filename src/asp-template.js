@@ -10,15 +10,39 @@ const script = pathToFileURL(scriptFile).href + '?revision=' + revision;
 const workbench = 'https://global.yonyoucloud.com/';
 
 async function updateTemplateField(service, input) {
-  const { requestId, templateId, templateName, transactionType, field, changes } = input;
+  const { requestId, templateId, templateName, transactionType, field, changes, designerUrl: directUrl } = input;
   if (!templateId && !templateName) throw new Error('Provide templateId or templateName');
+  if (directUrl) {
+    const url = new URL(directUrl);
+    if (url.origin !== new URL(workbench).origin ||
+        url.pathname !== '/iuap-yonbuilder-designer/ucf-wh/designer/apps/quickdev/index.html' ||
+        !/^#\/onepage\/design\/znbzbx\/PT\d+\/ysmdd\?/.test(url.hash)) {
+      throw new Error('Provide the ASP reimbursement designer URL from the selected workbench row');
+    }
+    if (!templateId || transactionType) throw new Error('Direct designer access requires templateId. Omit designerUrl to match transactionType in the workbench.');
+  }
   const required = changes.required;
-  const criteria = [{ id: 'required', path: 'required', equals: required }];
+  const useModel = Boolean(directUrl) || Object.keys(changes).length !== 1 || required === undefined;
+  const desired = { ...changes.properties };
+  for (const [alias, key] of Object.entries({ required: 'UI#required', visible: 'bShowIt', editable: 'bCanModify', caption: 'UI#cShowCaption' })) {
+    if (!Object.hasOwn(changes, alias)) continue;
+    if (Object.hasOwn(desired, key)) throw new Error('Supply ' + alias + ' or properties.' + key + ' once');
+    desired[key] = changes[alias];
+  }
+  if (Object.hasOwn(desired, 'formula')) throw new Error('Use changes.formula to set or clear a calculation formula');
+  if (Object.hasOwn(changes, 'formula')) {
+    const value = changes.formula;
+    desired.formula = typeof value === 'string' ? { expression: value, display: '' } :
+      value && { expression: value.expression, display: value.display ?? '' };
+  }
+  const criteria = useModel ? [{ id: 'properties', path: 'matches', equals: true }]
+    : [{ id: 'required', path: 'required', equals: required }];
   if (templateId) criteria.push({ id: 'template', path: 'templateId', equals: templateId });
   if (templateName) criteria.push({ id: 'template-name', path: 'templateName', equals: templateName });
-  if (transactionType) criteria.push({ id: 'transaction', path: 'transactionType', equals: transactionType });
+  if (transactionType && !useModel) criteria.push({ id: 'transaction', path: 'transactionType', equals: transactionType });
   const run = service.begin({ requestId: 'asp-template:' + requestId, url: workbench,
-    goal: JSON.stringify({ templateId, templateName, transactionType, field, required }), criteria });
+    goal: JSON.stringify(useModel ? { templateId, templateName, transactionType, field, directUrl, desired }
+      : { templateId, templateName, transactionType, field, required }), criteria });
   const runId = run.runId;
 
   async function round(step, purpose, args, pageLabel = 'p1') {
@@ -36,6 +60,34 @@ async function updateTemplateField(service, input) {
   async function interrupted(execution) {
     if (execution.state === 'failed') await finish('failed', execution.error.message);
     return { runId, status: execution.state, error: execution.error, executionId: execution.executionId };
+  }
+
+  if (useModel) {
+    const lookup = await round('locateModel', 'observe', { templateId, templateName, transactionType, field, designerUrl: directUrl, desired });
+    if (lookup.state !== 'succeeded') return interrupted(lookup);
+    const { designerUrl, pageLabel, values: before, properties: _properties, matches, ...identity } = lookup.result;
+    if (identity.status) {
+      await finish('cancelled', identity.status);
+      return { runId, ...identity };
+    }
+    const target = { ...identity, designerUrl, desired };
+    let write;
+    if (!matches) {
+      write = await round('updateModel', 'execute', target, pageLabel);
+      if (write.state === 'outcome_unknown' && !write.executionStopped) return interrupted(write);
+    }
+    const observed = await round('verifyModel', 'observe', target);
+    if (observed.state !== 'succeeded') return interrupted(observed);
+    const actual = observed.result;
+    const verified = actual.templateId === identity.templateId && actual.nid === identity.nid && actual.matches === true;
+    const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
+    await finish(verified ? 'succeeded' : 'failed', verified ? 'Read the field model in a fresh designer' :
+      'Reopened designer did not show the requested properties', verified ? verification : []);
+    return { runId, ...identity, designerUrl, before, after: actual.values, properties: actual.properties,
+      verified, observationId: observed.observationId,
+      status: verified ? write?.result?.changed ? 'updated' : write ? 'verified' :
+        Object.keys(desired).length ? 'already_set' : 'inspected' : 'verification_failed',
+      ...(write?.error ? { writeError: write.error.message } : {}) };
   }
 
   const lookup = await round('locate', 'observe', { templateId, templateName, transactionType, field });

@@ -88,7 +88,7 @@ async function selectField(page, field) {
   return { ...selected, ...property };
 }
 
-export async function locate(task, page, input) {
+async function locateDesigner(task, page, input) {
   await openList(page);
   const candidates = await page.evaluate(templateRows, input);
   if (candidates.length !== 1) return { status: candidates.length ? 'ambiguous_template' : 'template_not_found', candidates };
@@ -109,8 +109,13 @@ export async function locate(task, page, input) {
   const tab = await until(async () => (await task.tabs()).find(tab => tab.label && !previous.includes(tab.label) &&
     tab.url.startsWith(workbench + 'iuap-yonbuilder-designer/') &&
     tab.title.replace(/\s*-\s*单据设计器$/, '') === target.templateName), 'designer for ' + target.templateName);
-  const designer = task.page(tab.label);
-  return { ...target, ...await selectField(designer, input.field), designerUrl: tab.url, pageLabel: tab.label };
+  return { ...target, designerUrl: tab.url, pageLabel: tab.label };
+}
+
+export async function locate(task, page, input) {
+  const target = await locateDesigner(task, page, input);
+  if (target.status) return target;
+  return { ...target, ...await selectField(task.page(target.pageLabel), input.field) };
 }
 
 export async function update(task, page, target) {
@@ -147,4 +152,131 @@ export async function verify(task, page, target) {
   await until(() => reader.evaluate(name => document.title.replace(/\s*-\s*单据设计器$/, '') === name, target.templateName),
     'reopened template');
   return { ...rows[0], ...await selectField(reader, target.field) };
+}
+
+// Executed in the designer tab. Use YonCode's own field actions and save flow.
+async function designerModel(input) {
+  const scene = window.ydf?.scene;
+  const tree = window.yyds?.getGlobalData('tplTree');
+  const tools = scene?.yonCodePanelModel?._aiTools;
+  if (!tree?.children || !tools?.get('ai.page.save') || typeof scene.aiPageSave !== 'function') return false;
+
+  const templateName = document.title.replace(/\s*-\s*单据设计器$/, '');
+  if (tree.cBillNo !== 'znbzbx_expensebill' || (input.templateName && input.templateName !== templateName)) {
+    return { status: 'template_mismatch' };
+  }
+  const matches = [];
+  function visit(node) {
+    if (node.uiTable === 'BillItemBase' && node.entityCode === 'znbzbx_expensebill' &&
+        String(node.iTplId) === input.templateId && !node.isDeleted &&
+        (input.nid ? node.nid === input.nid :
+          [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field))) {
+      matches.push(node);
+    }
+    node.children?.forEach(visit);
+  }
+  visit(tree);
+  const identify = node => ({ field: node.cItemName, fieldName: node.cShowCaption, nid: node.nid });
+  if (matches.length !== 1) {
+    return { status: matches.length ? 'ambiguous_field' : 'field_not_found', candidates: matches.map(identify) };
+  }
+  const identity = { templateId: input.templateId, templateName, ...identify(matches[0]) };
+  const { nid } = identity;
+  const props = scene.propSettingModel;
+  if (props.innerTplNode?.nid !== nid || !props.innerCompMeta) {
+    scene.updateCurrNode(nid);
+    return false;
+  }
+
+  const read = key => {
+    const node = window.yyds.getNodeByNid(nid);
+    if (key === 'formula') {
+      return Number(node.iFormula) === 1
+        ? { expression: node.formula, display: node.formulaDisplay ?? '' }
+        : null;
+    }
+    if (key === 'cEnumType' || key === 'cRefType') return node[key] ?? null;
+    return props.innerCompMeta.getProp(key)?.value ?? null;
+  };
+  const entries = Object.entries(input.desired);
+  if (!entries.length) {
+    const properties = props.innerCompMeta.normalProps.map(prop => ({
+      code: prop.code, name: prop.name, type: prop.controlType, disabled: prop.disabled, value: read(prop.code)
+    }));
+    return { ...identity, properties, matches: true };
+  }
+  const snapshot = () => Object.fromEntries(entries.map(([key]) => [key, read(key)]));
+  const same = (value, expected) => {
+    if (Array.isArray(expected)) {
+      return Array.isArray(value) && value.length === expected.length && expected.every((v, i) => same(value[i], v));
+    }
+    if (expected && typeof expected === 'object') {
+      return !!value && typeof value === 'object' && Object.keys(value).length === Object.keys(expected).length &&
+        Object.entries(expected).every(([key, v]) => Object.hasOwn(value, key) && same(value[key], v));
+    }
+    return value === expected;
+  };
+  for (const [key] of entries) {
+    if (!props.innerCompMeta.getProp(key)) throw new Error('Field property is unavailable: ' + key);
+  }
+  const before = snapshot();
+  const pending = entries.filter(([key, value]) => !same(before[key], value));
+  if (!input.write || !pending.length) return { ...identity, values: before, matches: !pending.length, changed: false };
+
+  const actions = {
+    formula: ['ai.elem.setFormula', value => value === null ? {} : { formula: value.expression, formulaDisplay: value.display }],
+    'UI#cShowCaption': ['ai.elem.setCaption', value => ({ caption: value })],
+    cDefaultValue: ['ai.elem.setDefaultValue', value => ({ cDefaultValue: value })],
+    cEnumType: ['ai.elem.setEnumType', value => ({ cEnumType: value })],
+    cRefType: ['ai.elem.setRefType', value => ({ cRefType: value })],
+  };
+  const execute = async (name, args) => {
+    const action = tools.get(name)?.tool;
+    if (!action) throw new Error('Designer action is unavailable: ' + name);
+    const result = await action.execute(args);
+    if (typeof result === 'string') throw new Error(name + ': ' + result);
+    return result;
+  };
+  for (const [key] of pending) {
+    const prop = props.innerCompMeta.getProp(key);
+    if (!prop || !prop.isNormal || prop.disabled) throw new Error('Field property is unavailable for editing: ' + key);
+  }
+  if (scene.viewNoSave) throw new Error('The designer has unsaved changes');
+
+  for (const [key, value] of pending) {
+    const [name, args] = Object.hasOwn(actions, key)
+      ? actions[key]
+      : ['ai.elem.set', propValue => ({ propName: key, propValue })];
+    const result = await execute(name, { nid, ...args(value) });
+    if (result?.nid !== nid) throw new Error('The designer did not confirm the change to ' + key);
+  }
+  const staged = snapshot();
+  if (entries.some(([key, value]) => !same(staged[key], value))) {
+    throw new Error('The designer staged different values: ' + JSON.stringify(staged));
+  }
+  const saved = await execute('ai.page.save', {});
+  if (!saved?.success) throw new Error('Designer save failed: ' + JSON.stringify(saved));
+  return { changed: true };
+}
+
+export async function locateModel(task, page, input) {
+  const target = input.designerUrl
+    ? { templateId: input.templateId, templateName: input.templateName, designerUrl: input.designerUrl, pageLabel: 'p1' }
+    : await locateDesigner(task, page, input);
+  if (target.status) return target;
+  const designer = task.page(target.pageLabel);
+  if (input.designerUrl) await designer.goto(input.designerUrl);
+  const found = await until(() => designer.evaluate(designerModel, { ...input, ...target }), 'designer field model');
+  return { ...target, ...found };
+}
+
+export async function updateModel(task, page, input) {
+  if (await page.url() !== input.designerUrl) throw new Error('The selected designer changed before saving');
+  return until(() => page.evaluate(designerModel, { ...input, write: true }), 'designer field update');
+}
+
+export async function verifyModel(task, page, input) {
+  const reader = await task.newPage();
+  await reader.goto(input.designerUrl);
+  return until(() => reader.evaluate(designerModel, input), 'reopened designer field model');
 }

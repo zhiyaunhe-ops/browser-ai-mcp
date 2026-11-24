@@ -13,6 +13,7 @@ const idempotent = { runId: text, requestId: text };
 const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional() };
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
 const output = { data: z.unknown() };
+const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
@@ -33,9 +34,13 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
-  register('asp_ui_template_update_field', 'Set required on one ASP UAT PC general reimbursement header field. Provide the exact template name or ID and the field label or code. Returns candidates on ambiguity or the old and independently reopened value. Reuse requestId when resuming.', {
+  register('asp_ui_template_update_field', 'Update ordinary properties and the calculation formula of an ASP UAT PC general reimbursement header field. Provide the exact template name or ID and the field label or code. Supply designerUrl with templateId for click-free access. Pass an empty changes object to inspect the property codes. Reuse requestId when resuming.', {
     requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
-    field: text, changes: z.object({ required: z.boolean() }).strict()
+    designerUrl: z.string().url().optional(), field: text,
+    changes: z.object({
+      required: z.boolean().optional(), visible: z.boolean().optional(), editable: z.boolean().optional(),
+      caption: text.optional(), formula: formula.optional(), properties: z.record(z.unknown()).optional()
+    }).strict()
   }, args => updateTemplateField(service, args));
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
