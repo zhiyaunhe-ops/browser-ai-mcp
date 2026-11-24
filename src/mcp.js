@@ -35,7 +35,7 @@ function createMcpServer(service = createService()) {
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
   }, args => service.begin(args));
-  register('browser_run', 'Execute ego code with task, page and input. Return JSON and poll run_get. On a missing Yonyou node, try observed row, hover, More and edit-mode entrances from ys.entries() and modeActions. Re-read after each attempt. Use ys.transferState/transferRight for two-pane pickers. Includes memo, scoped readers and observationTrace by default. DOM globals belong in page.evaluate(). Business completion requires a later independent observe round and run_finish.', {
+  register('browser_run', 'Execute ego code with task, page and input. Return JSON and poll run_get. Check pageMemos on the settled execution for reminders matching the observed route and dialog before the next action. On a missing Yonyou node, try observed row, hover, More and edit-mode entrances from ys.entries() and modeActions. Re-read after each attempt. Use ys.transferState/transferRight for two-pane pickers. Includes memo, scoped readers and observationTrace by default. DOM globals belong in page.evaluate(). Business completion requires a later independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
     args: z.unknown().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     pageLabel: text.optional(), resumeAfterUserAction: z.boolean().optional(), memo: z.boolean().optional(),
@@ -44,7 +44,7 @@ function createMcpServer(service = createService()) {
   register('run_get', 'Read durable run and execution state without replaying commands. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
-  register('run_finish', 'Verify declared criteria against a later observation, atomically submit memory feedback, and finish the ego Space once.', {
+  register('run_finish', 'Verify declared criteria against a later observation, atomically submit memory feedback, and finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
     ...idempotent, outcome: z.enum(['succeeded', 'failed', 'unknown', 'cancelled']),
     verification: z.array(z.object({ criterionId: text, observationId: text })).default([]),
     decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']),

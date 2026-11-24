@@ -39,7 +39,7 @@ class EgoAdapter {
     const script = path.join(directory, 'round.mjs');
     const configuration = { runId: options.runId, executionId: options.executionId,
       spaceId: options.spaceId ?? null, name: options.name || `browser-ai:${options.runId}`,
-      pageLabel: options.pageLabel || 'p1', args: options.args ?? null,
+      pageLabel: options.pageLabel || 'p1', args: options.args ?? null, pageMemoRead: options.pageMemoRead,
       resumeAfterUserAction: options.resumeAfterUserAction === true,
       keep: options.keep || [], mode: options.mode, directory: directory.replaceAll('\\', '/') };
     // The installed ego runtime supplies taskSpace/Page. This module runs INSIDE
@@ -130,6 +130,10 @@ try {
     envelope.observationTrace = memoModule.observationTrace(memoPage);
   }
 } catch { /* Telemetry must not change execution outcome. */ }
+if (memoModule && memoPage && config.pageMemoRead && envelope.state === 'succeeded') {
+  try { envelope.pageContext = await memoModule.readMemoContext(memoPage, config.pageMemoRead); }
+  catch { /* A closed or navigating page can no longer supply a reminder. */ }
+}
 await save('result.json', envelope);
 `;
     fs.writeFileSync(script, source, 'utf8');

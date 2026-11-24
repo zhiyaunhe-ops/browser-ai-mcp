@@ -67,3 +67,22 @@ test("versioned memo import refreshes a fake page with a prior boolean marker", 
   }
 });
 
+
+test('memo context uses the last operated page without adding observation trace events', async () => {
+  const memo = await import(`../scripts/ego-memo.mjs?context-test=${Date.now()}`);
+  const makePage = (label, url, title) => ({ label, async url() { return url; }, async click() {},
+    async evaluate(_fn, options) {
+      assert.deepEqual(options.parts, ['status']);
+      return { url, modal: { title }, documents: [], complete: true };
+    } });
+  const main = makePage('main', 'https://example.test/main', 'Main');
+  const detail = makePage('detail', 'https://example.test/items#edit', 'Edit item');
+  const task = { page(label) { return label === 'detail' ? detail : main; } };
+  await memo.install(main, { task, pageLabel: 'main', catalog: false });
+  const target = task.page('detail');
+  await target.click('button');
+  const trace = memo.observationTrace(main);
+  assert.deepEqual(await memo.readMemoContext(main, 'url'), { url: 'https://example.test/items#edit', pageLabel: 'detail' });
+  assert.deepEqual(await memo.readMemoContext(main, 'dialog'), { url: 'https://example.test/items#edit', dialogTitle: 'Edit item', pageLabel: 'detail' });
+  assert.deepEqual(memo.observationTrace(main), trace);
+});

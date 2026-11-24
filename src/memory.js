@@ -32,11 +32,12 @@ function terms(value) {
   return output;
 }
 
-function routeMatches(entry, url) {
+function routeMatches(entry, url, dialogTitle) {
   const match = entry.match || {};
   return (match.path === undefined || match.path === url.pathname) &&
     (match.pathPrefix === undefined || url.pathname.startsWith(match.pathPrefix)) &&
-    (match.hashPrefix === undefined || url.hash.startsWith(match.hashPrefix));
+    (match.hashPrefix === undefined || url.hash.startsWith(match.hashPrefix)) &&
+    (match.dialogTitle === undefined || match.dialogTitle === dialogTitle);
 }
 
 function content(value) {
@@ -45,6 +46,16 @@ function content(value) {
 
 class Memory {
   constructor(store) { this.store = store; }
+
+  pageRules(domain) {
+    return this.store.list('memory').filter(entry => entry.scope === 'page' &&
+      entry.domain === domain && entry.verification !== 'stale');
+  }
+
+  pageMemos(url, dialogTitle) {
+    return this.pageRules(url.hostname).filter(entry => routeMatches(entry, url, dialogTitle))
+      .map(({ id, name, summary, revision = 0, verification }) => ({ id, name, summary, revision, verification }));
+  }
 
   search({ url: value, goal = '', limit = 5 } = {}) {
     const url = urlOf(value);
@@ -86,8 +97,12 @@ class Memory {
     const aliases = input.aliases === undefined ? [] : input.aliases;
     if (!Array.isArray(aliases) || aliases.length > 30) throw fail('INVALID_MEMORY', 'aliases must be an array of at most 30 strings');
     const match = input.match === undefined ? (scope === 'page' ? { path: url.pathname, ...(url.hash ? { hashPrefix: url.hash } : {}) } : {}) : input.match;
-    if (!plain(match) || Object.keys(match).some(field => !['path', 'pathPrefix', 'hashPrefix'].includes(field))) throw fail('INVALID_MEMORY', 'match supports path, pathPrefix and hashPrefix');
+    if (!plain(match) || Object.keys(match).some(field => !['path', 'pathPrefix', 'hashPrefix', 'dialogTitle'].includes(field))) throw fail('INVALID_MEMORY', 'match supports path, pathPrefix, hashPrefix and dialogTitle');
     for (const [field, value] of Object.entries(match)) {
+      if (field === 'dialogTitle') {
+        if (text(value, 'match.dialogTitle', 200, true) !== value) throw fail('INVALID_MEMORY', 'dialogTitle must be trimmed');
+        continue;
+      }
       text(value, `match.${field}`, 2000, true);
       if (!value.startsWith(field === 'hashPrefix' ? '#' : '/')) throw fail('INVALID_MEMORY', 'match fields must start with / or #');
     }

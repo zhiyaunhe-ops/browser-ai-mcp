@@ -39,6 +39,27 @@ npm ci
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
 
+## 页面提醒
+
+每轮 `browser_run` 成功后，MCP 按本轮操作的页面匹配已保存的提醒。例如费用导入和导入结果共用一个网址时，可以分别按弹窗标题保存两条提醒。命中的摘要随执行结果的 `pageMemos` 返回，异步执行可从 `run_get` 读取同一结果。打开弹窗后结束这一轮，下一轮准备文件或提交时就能用到提醒。
+
+通过 `run_finish` 的 `updates` 保存规则。下面是一条示例，路径、标题和要求应替换成现场确认的内容。
+
+```json
+{
+  "baseRevision": 0,
+  "entry": {
+    "scope": "page",
+    "key": "expense-import-template",
+    "name": "费用导入模板",
+    "summary": "准备文件时，将费用项目编码列保留为文本，以保留前导零。",
+    "match": { "path": "/expenses", "dialogTitle": "费用导入" }
+  }
+}
+```
+
+匹配条件同时生效。弹窗标题按可见窗口的实际标题精确匹配；省略标题时可用路径或 hash 匹配独立页面。规则沿用记忆库的版本管理，标为 `stale` 后停止随页面返回。
+
 ## 开发验证
 
 `npm test` 运行 Node 测试，`npm run check:docs` 检查文档链接。`npm run test:e2e` 通过本机 ego lite 和真实 MCP stdio 操作本地测试页面，运行前需完成 ego 桌面初始化。

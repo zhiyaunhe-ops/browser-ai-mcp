@@ -397,3 +397,54 @@ test('ego CLI launch failures are definite pre-start failures and do not masquer
   assert.equal(adapter.children.size, 0);
 });
 
+
+test('page memos match trusted page context across rounds and appear in finish feedback', async t => {
+  const contexts = [
+    { url: 'https://example.test/items#edit/1', dialogTitle: 'Edit item', pageLabel: 'main' },
+    { url: 'https://example.test/items#edit/2', dialogTitle: 'Edit item details', pageLabel: 'main' },
+    { url: 'https://other.test/items#edit/1', dialogTitle: 'Edit item', pageLabel: 'main' },
+  ];
+  const { adapter } = makeAdapter({ async run() {
+    return { state: 'succeeded', result: { ok: true }, pageContext: contexts.shift(), spaceId: 100, executionStopped: true };
+  } });
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const url = 'https://example.test/items#edit/1';
+  const seed = (key, match, verification = 'unverified', seedUrl = url) => service.memory.applyUpdates(
+    { runId: 'seed', url: seedUrl }, [{ baseRevision: 0, entry: { key, name: key, summary: `Rule ${key}`,
+      scope: 'page', url: seedUrl, match, verification } }], [], 'failed')[0];
+  const stale = seed('stale', { path: '/items', hashPrefix: '#edit', dialogTitle: 'Edit item' }, 'stale');
+  const wrongPath = seed('wrong-path', { path: '/elsewhere', dialogTitle: 'Edit item' });
+  const wrongHash = seed('wrong-hash', { path: '/items', hashPrefix: '#view', dialogTitle: 'Edit item' });
+  const foreign = seed('foreign', { path: '/items', hashPrefix: '#edit', dialogTitle: 'Edit item' }, 'unverified', 'https://other.test/items');
+  const initial = (await client.callTool({ name: 'run_begin', arguments: { requestId: 'seed-begin', goal: 'Learn rule', url, criteria: [] } })).structuredContent.data;
+  const saved = await client.callTool({ name: 'run_finish', arguments: { runId: initial.runId, requestId: 'seed-finish',
+    outcome: 'failed', decision: 'learned', note: 'Save a page rule.', updates: [{ baseRevision:  0, entry: {
+      key: 'edit-dialog', name: 'Edit dialog', summary: 'Use the edit dialog', scope: 'page', url,
+      match: { path: '/items', hashPrefix: '#edit', dialogTitle: 'Edit item' },
+    } }] } });
+  assert.equal(saved.isError, undefined, JSON.stringify(saved));
+  const id = saved.structuredContent.data.feedback.changedMemoryIds[0];
+  const stored = (await client.callTool({ name: 'memory_get', arguments: { memoryId: id } })).structuredContent.data;
+  assert.deepEqual(stored.match, { path: '/items', hashPrefix: '#edit', dialogTitle: 'Edit item' });
+
+  const run = (await client.callTool({ name: 'run_begin', arguments: { requestId: 'begin-context', goal: 'Unrelated task',
+    url: 'https://example.test/start', criteria: [] } })).structuredContent.data;
+  const execute = async requestId => {
+    const invocation = (await client.callTool({ name: 'browser_run', arguments: { runId: run.runId, requestId,
+      purpose: 'observe', code: 'return { ok: true };' } })).structuredContent.data;
+    return waitForExecution(client, run.runId, invocation.executionId);
+  };
+  const first = await execute('first-context');
+  assert.equal(first.pageMemos.length, 1);
+  assert.deepEqual((({ id, summary, revision }) => ({ id, summary, revision }))(first.pageMemos[0]),
+    { id, summary: 'Use the edit dialog', revision: 1 });
+  const second = await execute('different-dialog');
+  assert.deepEqual(second.pageMemos, []);
+  const third = await execute('foreign-domain');
+  assert.deepEqual(third.pageMemos, []);
+  const finished = (await client.callTool({ name: 'run_finish', arguments: { runId: run.runId, requestId: 'finish-context',
+    outcome: 'failed', decision: 'no-change', note: 'Observed page rules.' } })).structuredContent.data;
+  assert.ok(finished.feedback.recalledMemoryIds.includes(id));
+  for (const excluded of [stale, wrongPath, wrongHash, foreign]) assert.ok(!finished.feedback.recalledMemoryIds.includes(excluded));
+});

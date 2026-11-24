@@ -171,11 +171,13 @@ class BrowserService {
       // Request deduplication above still returns an existing invocation unchanged.
       const programCheck = assertProgram(args.code);
       const executionId = this.id();
+      const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url).hostname);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
         sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
         timeoutMs: args.timeoutMs || 30000, spaceId: run.spaceId, name: run.name,
         pageLabel: args.pageLabel || run.pageLabel, resumeAfterUserAction: args.resumeAfterUserAction === true,
         memo: args.memo !== false,
+        pageMemoRead: pageRules.some(rule => rule.match?.dialogTitle) ? 'dialog' : pageRules.length ? 'url' : null,
         programWarnings: programCheck.warnings,
         directory: path.join(this.store.directory, 'executions', executionId),
         ownerId: this.ownerId, ownerPid: process.pid, startedAt: this.now(), executionStopped: false };
@@ -229,6 +231,14 @@ class BrowserService {
         recovery: recoveryFor(result.error),
         finishedAt: this.now() });
       if (result.spaceId != null) { execution.spaceId = result.spaceId; run.spaceId = result.spaceId; }
+      if (result.state === 'succeeded' && execution.memo !== false && result.pageContext) {
+        const url = URL.parse(result.pageContext.url);
+        execution.pageMemos = [];
+        if (url && ['http:', 'https:'].includes(url.protocol) && url.hostname === new URL(run.url).hostname) {
+          execution.pageMemos = this.memory.pageMemos(url, result.pageContext.dialogTitle);
+          execution.memoPageLabel = result.pageContext.pageLabel || execution.pageLabel;
+        }
+      }
       if (result.state === 'succeeded' && execution.purpose === 'observe' && !execution.observationId) {
         const observationId = this.id();
         execution.observationId = observationId;
@@ -252,7 +262,7 @@ class BrowserService {
   }
 
   executionView(execution) {
-    const { code, args, result, ...view } = execution;
+    const { code, args, result, pageMemoRead, ...view } = execution;
     return { ...view, result: small(result), resultArtifact: path.join(execution.directory, 'result.json') };
   }
   async wait(pending) {
@@ -317,7 +327,8 @@ class BrowserService {
         }
       } else if (args.outcome !== 'unknown') evidenceIds.push(...executions.map(e => e.executionId));
       const used = args.usedMemoryIds || [];
-      const recalled = [...(run.recalledMemory.domainRules || []), ...(run.recalledMemory.matches || [])].map(m => m.id);
+      const recalled = [...new Set([...(run.recalledMemory.domainRules || []), ...(run.recalledMemory.matches || []),
+        ...executions.flatMap(execution => execution.pageMemos || [])].map(m => m.id))];
       for (const id of used) {
         const memory = this.memory.get(id);
         if (memory.domain !== new URL(run.url).hostname) throw problem('INVALID_MEMORY', 'Used memory must match the task domain');

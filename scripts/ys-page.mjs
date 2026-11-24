@@ -1,7 +1,7 @@
 /** Yonyou DOM augmentation. Native ego snapshots remain the general page reader. */
 export const VERSION = '2026-11-17.1';
 export const BUSY = '.u-loader,.u-loading,.u-loading-mask,.wui-loading,.wui-loading-mask,.lebra-loading,.nc-loading,.loading-mask,.el-loading-mask,[aria-busy="true"]';
-const MODALS = '.wui-modal,.u-modal,.lebra-modal,.modal-dialog,.el-dialog,[role="dialog"]';
+const MODALS = '.wui-modal,.u-modal,.lebra-modal,.modal-dialog,.el-dialog,dialog,[role="dialog"]';
 const PARTS = ['fields', 'toolbar', 'rows', 'status'];
 function positive(value, fallback, name) {
   const result = value ?? fallback;
@@ -117,7 +117,9 @@ export async function context(page, opts = {}) {
       const modals = all(c.modals).filter(visible); modalCount = modals.length;
       const last = modals.at(-1);
       if (last) modal = { cls: String(last.className || '').slice(0, 80), framePath: pathOf(last),
-        title: text(last.querySelector('h1,h2,h3,.wui-modal-title,.u-modal-title')).slice(0, 100),
+        title: (last.getAttribute('aria-label') || (last.getAttribute('aria-labelledby') || '').split(/\s+/)
+          .filter(Boolean).map(id => text(last.ownerDocument.getElementById(id))).join(' ').trim() ||
+          text(last.querySelector('h1,h2,h3,.wui-modal-title,.u-modal-title,.lebra-modal-title,.modal-title,.el-dialog__title'))).trim().slice(0, 200),
         buttons: [...last.querySelectorAll('button,a,.wui-modal-ok-button,.wui-modal-cancel-button')].filter(visible).map(text).filter(Boolean).slice(0, 10) };
       signature.push(['status', errorTexts, toastTexts, busy.length, modals.map(el => [pathOf(el), text(el)])]);
     }

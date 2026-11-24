@@ -57,6 +57,7 @@ function instrument(page, c, label) {
     selectOption: 'action', focus: 'action', press: 'action', setInputFiles: 'action', goto: 'action', reload: 'action' };
   for (const [key, stage] of Object.entries(stages)) wrap(page, key, async function (original, args) {
     const { c, label } = binding();
+    c.lastPage = page;
     return measured(c, label, `page.${key}`, stage, async () => {
       assertCall(`page.${key}`, args);
       if (key === 'evaluate') c.stats.evaluated++;
@@ -69,6 +70,7 @@ function instrument(page, c, label) {
   });
   for (const key of ['click', 'move', 'wheel', 'down', 'up']) wrap(page.mouse, key, async function (original, args) {
     const { c, label } = binding();
+    c.lastPage = page;
     return measured(c, label, `page.mouse.${key}`, 'action', async () => {
       assertCall(`page.mouse.${key}`, args);
       if (key === 'click' && Number.isFinite(args[0]) && Number.isFinite(args[1])) {
@@ -88,7 +90,10 @@ function instrumentTask(task, c) {
   registry.tasks.set(task, c);
   wrap(task, 'page', function (original, args) { return instrument(original.apply(this, args), registry.tasks.get(task), args[0]); });
   for (const key of ['newPage', 'adopt']) wrap(task, key, async function (original, args) {
-    return instrument(await original.apply(this, args), registry.tasks.get(task));
+    const c = registry.tasks.get(task);
+    const page = instrument(await original.apply(this, args), c);
+    c.lastPage = page;
+    return page;
   });
   wrap(task, 'pages', async function (original, args) {
     return (await original.apply(this, args)).map(page => instrument(page, registry.tasks.get(task)));
@@ -152,6 +157,18 @@ export function observationTrace(page) {
   if (!c) return null;
   return { version: 1, events: c.events.map(event => ({ ...event, ...(!event.outcome ? { outcome: 'pending' } : {}) })),
     droppedEvents: c.droppedEvents, counts: structuredClone(c.counts) };
+}
+export async function readMemoContext(page, mode) {
+  const target = registry.pages.get(page)?.c.lastPage || page;
+  const pageLabel = registry.pages.get(target)?.label || target.label;
+  if (mode === 'url') return { pageLabel, url: await target.url() };
+  const moduleUrl = new URL('./ys-page.mjs', import.meta.url);
+  moduleUrl.search = new URL(import.meta.url).search;
+  const { context } = await import(moduleUrl.href);
+  // This read supplies reminders, separate from the caller's observation trace.
+  const evaluate = (target.evaluate[ORIGINAL] || target.evaluate).bind(target);
+  const state = await context({ evaluate }, { parts: ['status'] });
+  if (state.url) return { pageLabel, url: state.url, dialogTitle: state.modal?.title || null };
 }
 export function prelude(moduleUrl = import.meta.url) {
   return [`const __egoMemo = await import(${JSON.stringify(moduleUrl)});`, 'await __egoMemo.install(page);',
