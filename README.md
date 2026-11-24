@@ -53,7 +53,8 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 - `changes` 支持 `required`（必填）、`visible`（显示）、`editable`（允许修改）、`caption`（标题）。其他普通属性通过 `changes.properties` 按属性编码配置，例如 `{"iColWidth": 2, "UI#placeholder": "请输入报销说明", "cDefaultValue": "培训"}`。传 `changes: {}` 可读取该字段的属性编码、当前值及控件禁用状态。可编辑范围由具体字段和设计器决定。
 - `changes.formula` 接收用友公式表达式、`{"expression": "...", "display": "..."}` 或 `null`。设计器负责解析表达式和生成触发字段及函数清单。传 `null` 清空计算公式。
 - 同时提供 `templateId` 和工作台打开的 `designerUrl` 可全程走无点击路径。设计器 URL 内的 `PT…` 编码与工作台模板 ID 是两个不同的标识。通过模板名称或 ID 搜索时，仍由工作台打开设计器。
-- 扩展属性使用设计器内置动作设置，调用设计器原生保存动作，再打开新页面独立回读。只传 `required` 且省略 `designerUrl` 时沿用原流程和布尔返回值。新流程以属性编码为键返回修改前后值和回读观察记录 ID。当前值已符合要求时跳过保存。
+- 字段属性按模板 ID、表头字段编码和节点 ID 定位。设计器负责构造保存 POST，工具在新页面独立读回同一节点。保存请求里的模板 ID 与本次目标一致且收到对应响应时，`savePost` 返回请求方法、路径、模板 ID 和 HTTP 状态。当前值已符合要求时跳过保存。
+- 只传 `required` 且省略 `designerUrl` 时，`before` 和 `after` 仍是布尔值。其他模式按属性编码返回值。
 
 ## 页面提醒
 

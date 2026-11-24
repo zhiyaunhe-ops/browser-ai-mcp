@@ -47,7 +47,12 @@ async function updateTemplateField(service, input) {
 
   async function round(step, purpose, args, pageLabel = 'p1') {
     const code = 'const workflow = await import(' + JSON.stringify(script) + '); return await workflow.' + step + '(task, page, input);';
-    let execution = await service.browserRun({ runId, requestId: step, purpose, code, pageLabel, args, timeoutMs: 120000 });
+    // A retry may load a newer script revision. Resume the round already
+    // attached to this business request instead of submitting a changed script.
+    const previous = run.sequence && service.executions(runId).find(item => item.requestId === step);
+    let execution = previous
+      ? (await service.get({ runId, executionId: previous.executionId, limit: 1 })).executions[0]
+      : await service.browserRun({ runId, requestId: step, purpose, code, pageLabel, args, timeoutMs: 120000 });
     while (['queued', 'running'].includes(execution.state)) {
       await new Promise(resolve => setTimeout(resolve, 400));
       const state = await service.get({ runId, executionId: execution.executionId, limit: 1 });
@@ -87,6 +92,7 @@ async function updateTemplateField(service, input) {
       verified, observationId: observed.observationId,
       status: verified ? write?.result?.changed ? 'updated' : write ? 'verified' :
         Object.keys(desired).length ? 'already_set' : 'inspected' : 'verification_failed',
+      ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
       ...(write?.error ? { writeError: write.error.message } : {}) };
   }
 
@@ -99,7 +105,8 @@ async function updateTemplateField(service, input) {
   }
   const before = target.required;
   const identity = { templateId: target.templateId, templateName: target.templateName,
-    transactionType: target.transactionType, field: target.field, fieldName: target.fieldName };
+    transactionType: target.transactionType, field: target.field, fieldName: target.fieldName,
+    ...(target.nid ? { nid: target.nid } : {}) };
   let write;
   if (before !== required) {
     write = await round('update', 'execute', { ...identity, designerUrl, desired: required }, pageLabel);
@@ -108,12 +115,14 @@ async function updateTemplateField(service, input) {
   const observed = await round('verify', 'observe', { ...identity, designerUrl });
   if (observed.state !== 'succeeded') return interrupted(observed);
   const actual = observed.result;
-  const verified = actual.templateId === target.templateId && actual.field === target.field && actual.required === required;
+  const verified = actual.templateId === target.templateId && actual.field === target.field &&
+    (!target.nid || actual.nid === target.nid) && actual.required === required;
   const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
   await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested header field' :
     'Reopened template did not show the requested property', verified ? verification : []);
   return { runId, ...identity, before, after: actual.required ?? null, verified, observationId: observed.observationId,
     status: verified ? write?.result?.changed ? 'updated' : before === required ? 'already_set' : 'verified' : 'verification_failed',
+    ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
     ...(write?.error ? { writeError: write.error.message } : {}) };
 }
 module.exports = { updateTemplateField };

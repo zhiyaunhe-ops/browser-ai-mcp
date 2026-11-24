@@ -4,64 +4,115 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const designerUrl = 'https://example.test/designer';
+const target = {
+  designerUrl, templateId: '123', templateName: 'Expense', field: 'department', nid: 'node-1',
+};
+const savePath = '/iuap-yonbuilder-designer/iuap-front/ide/module/ext';
 
-function propertyPanel(initial) {
-  let required = initial;
-  let field = '';
-  let toggleClicks = 0;
-  let saveClicks = 0;
-  const toggle = {
-    disabled: false,
-    classList: { contains: name => name === 'is-checked' && required },
-    click() { toggleClicks++; required = !required; },
+function designerPage({ required = false, title = 'Expense', nodeId = target.nid, events = [] } = {}) {
+  const actions = [];
+  const node = {
+    nid: nodeId, uiTable: 'BillItemBase', entityCode: 'znbzbx_expensebill',
+    iTplId: target.templateId, cItemName: target.field, cShowCaption: 'Department',
   };
-  const save = { disabled: false };
-  const label = {
-    title: 'Department',
-    getAttribute: () => 'znbzbx_expensebill|department_tips',
-    click() { field = 'department'; },
-  };
-  const document = {
-    querySelector(selector) {
-      if (selector.startsWith('.labelWrapper')) return label;
-      if (selector.includes('cItemName')) return { value: field };
-      if (selector.includes('UI#required')) return toggle;
-      if (selector.includes('saveBtn')) return save;
-      throw new Error(`Unexpected selector: ${selector}`);
+  const prop = { code: 'UI#required', value: required, isNormal: true, disabled: false };
+  const tools = new Map([
+    ['ai.elem.set', { tool: { async execute(args) {
+      actions.push(['ai.elem.set', args]);
+      prop.value = args.propValue;
+      return { nid: args.nid };
+    } } }],
+    ['ai.page.save', { tool: { async execute(args) {
+      actions.push(['ai.page.save', args]);
+      return { success: true };
+    } } }],
+  ]);
+  const scene = {
+    yonCodePanelModel: { _aiTools: tools },
+    aiPageSave() {},
+    propSettingModel: {
+      innerTplNode: node,
+      innerCompMeta: { getProp: key => key === prop.code ? prop : undefined },
     },
-    querySelectorAll(selector) {
-      assert.ok(selector.startsWith('.labelWrapper'));
-      return [label];
+  };
+  const window = {
+    ydf: { scene },
+    yyds: {
+      getGlobalData: () => ({ cBillNo: 'znbzbx_expensebill', children: [node] }),
+      getNodeByNid: () => node,
     },
   };
   const page = {
     async url() { return designerUrl; },
+    async cdp() {},
+    async events() { return events; },
     async evaluate(fn, arg) {
-      const previous = global.document;
-      global.document = document;
-      try { return fn(arg); } finally { global.document = previous; }
-    },
-    async click(selector) {
-      assert.equal(selector, '.designLayoutTopRight button.saveBtn');
-      saveClicks++;
-      save.disabled = true;
+      const oldWindow = global.window;
+      const oldDocument = global.document;
+      global.window = window;
+      global.document = { title: `${title} - 单据设计器` };
+      try { return await fn(arg); } finally {
+        global.window = oldWindow;
+        global.document = oldDocument;
+      }
     },
   };
-  return { page, state: () => ({ required, field, toggleClicks, saveClicks }) };
+  return { page, actions, value: () => prop.value };
 }
 
-test('update switches the selected field to the requested value and saves once', async () => {
+test('update uses designer actions to set required and save for both boolean values', async () => {
   const { update } = await import('../scripts/asp-template.mjs');
   for (const desired of [true, false]) {
-    const { page, state } = propertyPanel(!desired);
-    assert.deepEqual(await update({}, page, { designerUrl, field: 'department', desired }), { changed: true });
-    assert.deepEqual(state(), { required: desired, field: 'department', toggleClicks: 1, saveClicks: 1 });
+    const { page, actions, value } = designerPage({ required: !desired });
+    const result = await update({}, page, { ...target, desired });
+    assert.equal(result.changed, true);
+    assert.equal(value(), desired);
+    assert.deepEqual(actions, [
+      ['ai.elem.set', { nid: target.nid, propName: 'UI#required', propValue: desired }],
+      ['ai.page.save', {}],
+    ]);
+    assert.equal(result.savePost, undefined);
   }
 });
 
-test('update does not switch or save an already matching property', async () => {
+test('update does not save when required already matches', async () => {
   const { update } = await import('../scripts/asp-template.mjs');
-  const { page, state } = propertyPanel(true);
-  assert.deepEqual(await update({}, page, { designerUrl, field: 'department', desired: true }), { changed: false });
-  assert.deepEqual(state(), { required: true, field: 'department', toggleClicks: 0, saveClicks: 0 });
+  const { page, actions } = designerPage({ required: true });
+  const result = await update({}, page, { ...target, desired: true });
+  assert.equal(result.changed, false);
+  assert.deepEqual(actions, []);
+  assert.equal(result.savePost, undefined);
+});
+
+test('update does not write when template or node does not match', async () => {
+  const { update } = await import('../scripts/asp-template.mjs');
+  for (const options of [{ title: 'Other template' }, { nodeId: 'other-node' }]) {
+    const { page, actions } = designerPage(options);
+    await update({}, page, { ...target, desired: true });
+    assert.deepEqual(actions, []);
+  }
+});
+
+test('update reports the observed same-origin designer save request', async () => {
+  const { update } = await import('../scripts/asp-template.mjs');
+  const events = [
+    { method: 'Network.requestWillBeSent', params: { requestId: 'save', request: { method: 'POST', url: `https://example.test${savePath}`, postData: JSON.stringify({ businessJson: JSON.stringify({ tplId: target.templateId, billNo: 'znbzbx_expensebill' }) }) } } },
+    { method: 'Network.responseReceived', params: { requestId: 'save', response: { status: 200, url: `https://example.test${savePath}` } } },
+  ];
+  const { page } = designerPage({ events });
+  const result = await update({}, page, { ...target, desired: true });
+  assert.deepEqual(result.savePost, { method: 'POST', path: savePath, templateId: target.templateId, status: 200 });
+});
+
+
+test('a save response for another template is not attributed to the target', async () => {
+  const { update } = await import('../scripts/asp-template.mjs');
+  const events = [
+    { method: 'Network.requestWillBeSent', params: { requestId: 'other', request: { method: 'POST', url: `https://example.test${savePath}`, postData: JSON.stringify({ businessJson: JSON.stringify({ tplId: 'other-template', billNo: 'znbzbx_expensebill' }) }) } } },
+    { method: 'Network.responseReceived', params: { requestId: 'other', response: { status: 200, url: `https://example.test${savePath}` } } },
+  ];
+  const { page } = designerPage({ events });
+  const result = await update({}, page, { ...target, desired: true });
+  assert.equal(result.changed, true);
+  assert.equal(result.savePost, undefined);
 });

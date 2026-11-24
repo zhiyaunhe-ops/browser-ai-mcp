@@ -2,9 +2,6 @@
 // ID to its designer URL; the designer's PT identifier is a different key.
 const workbench = 'https://global.yonyoucloud.com/';
 const tenantTitle = 'All SEASONS PROPERTY CO., LTD';
-const codeInput = '[fieldid="design|InputText|cItemName|Input"]';
-const requiredSwitch = 'button[fieldid="design|InputBool|UI#required|Switch"]';
-const saveButton = '.designLayoutTopRight button.saveBtn';
 
 async function until(read, description) {
   const deadline = Date.now() + 45000;
@@ -69,25 +66,6 @@ function templateRows(input) {
   return input.openId ? false : [...matches.values()];
 }
 
-async function selectField(page, field) {
-  const labels = '.labelWrapper[fieldid^="znbzbx_expensebill|"][fieldid$="_tips"]';
-  await until(() => page.evaluate(s => !!document.querySelector(s), labels), 'reimbursement header fields');
-  const candidates = await page.evaluate(({ labels, field }) => {
-    const found = [...document.querySelectorAll(labels)].map(el => ({
-      field: el.getAttribute('fieldid').split('|')[1].slice(0, -5), fieldName: el.title, el
-    })).filter(item => item.field === field || item.fieldName === field);
-    if (found.length === 1) found[0].el.click();
-    return found.map(({ field, fieldName }) => ({ field, fieldName }));
-  }, { labels, field });
-  if (candidates.length !== 1) return { status: candidates.length ? 'ambiguous_field' : 'field_not_found', candidates };
-  const [selected] = candidates;
-  const property = await until(() => page.evaluate(({ codeInput, requiredSwitch, field }) => {
-    const code = document.querySelector(codeInput), toggle = document.querySelector(requiredSwitch);
-    return code?.value === field && toggle && { required: toggle.classList.contains('is-checked') };
-  }, { codeInput, requiredSwitch, field: selected.field }), 'required property for ' + selected.field);
-  return { ...selected, ...property };
-}
-
 async function locateDesigner(task, page, input) {
   await openList(page);
   const candidates = await page.evaluate(templateRows, input);
@@ -112,48 +90,6 @@ async function locateDesigner(task, page, input) {
   return { ...target, designerUrl: tab.url, pageLabel: tab.label };
 }
 
-export async function locate(task, page, input) {
-  const target = await locateDesigner(task, page, input);
-  if (target.status) return target;
-  return { ...target, ...await selectField(task.page(target.pageLabel), input.field) };
-}
-
-export async function update(task, page, target) {
-  if (await page.url() !== target.designerUrl) throw new Error('The selected designer changed before saving');
-  const state = await selectField(page, target.field);
-  if (state.field !== target.field) throw new Error('The selected field changed before saving');
-  if (state.required === target.desired) return { changed: false };
-  const clicked = await page.evaluate(({ codeInput, requiredSwitch, target }) => {
-    const toggle = document.querySelector(requiredSwitch);
-    if (document.querySelector(codeInput)?.value !== target.field || !toggle || toggle.disabled ||
-        toggle.classList.contains('is-checked') === target.desired) return false;
-    toggle.click();
-    return true;
-  }, { codeInput, requiredSwitch, target });
-  if (!clicked) throw new Error('Required switch could not be changed');
-  await until(() => page.evaluate(({ codeInput, requiredSwitch, saveButton, target }) => {
-    const toggle = document.querySelector(requiredSwitch), save = document.querySelector(saveButton);
-    return document.querySelector(codeInput)?.value === target.field && toggle &&
-      toggle.classList.contains('is-checked') === target.desired && save && !save.disabled;
-  }, { codeInput, requiredSwitch, saveButton, target }), 'changed property and enabled Save');
-  await page.click(saveButton);
-  await until(() => page.evaluate(s => document.querySelector(s)?.disabled, saveButton), 'designer save completion');
-  return { changed: true };
-}
-
-export async function verify(task, page, target) {
-  // Resolve the template ID again from the workbench, then open the designer
-  // captured from that row in a fresh page to read the persisted property.
-  const rows = await page.evaluate(templateRows, { templateId: target.templateId, templateName: target.templateName,
-    transactionType: target.transactionType });
-  if (rows.length !== 1) throw new Error('Template identity changed before verification');
-  const reader = await task.newPage();
-  await reader.goto(target.designerUrl);
-  await until(() => reader.evaluate(name => document.title.replace(/\s*-\s*单据设计器$/, '') === name, target.templateName),
-    'reopened template');
-  return { ...rows[0], ...await selectField(reader, target.field) };
-}
-
 // Executed in the designer tab. Use YonCode's own field actions and save flow.
 async function designerModel(input) {
   const scene = window.ydf?.scene;
@@ -169,7 +105,7 @@ async function designerModel(input) {
   function visit(node) {
     if (node.uiTable === 'BillItemBase' && node.entityCode === 'znbzbx_expensebill' &&
         String(node.iTplId) === input.templateId && !node.isDeleted &&
-        (input.nid ? node.nid === input.nid :
+        (input.nid ? node.nid === input.nid && node.cItemName === input.field :
           [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field))) {
       matches.push(node);
     }
@@ -272,11 +208,57 @@ export async function locateModel(task, page, input) {
 
 export async function updateModel(task, page, input) {
   if (await page.url() !== input.designerUrl) throw new Error('The selected designer changed before saving');
-  return until(() => page.evaluate(designerModel, { ...input, write: true }), 'designer field update');
+  // Work on a dedicated designer tab. Only return the save receipt, never the
+  // request body or headers. The independent readback also works without a receipt.
+  const capture = await page.cdp('Network.enable', { maxPostDataSize: 262144 })
+    .then(() => page.events()).then(() => true, () => false);
+  const result = await until(() => page.evaluate(designerModel, { ...input, write: true }), 'designer field update');
+  if (!capture || !result.changed) return result;
+  const events = await page.events().catch(() => []);
+  const path = '/iuap-yonbuilder-designer/iuap-front/ide/module/ext';
+  const endpoint = new URL(path, input.designerUrl);
+  const requests = new Set();
+  for (const { method, params } of events) {
+    if (method === 'Network.requestWillBeSent') {
+      const request = params.request;
+      if (request.method !== 'POST' || request.url.split('?')[0] !== endpoint.href) continue;
+      try {
+        const business = JSON.parse(JSON.parse(request.postData).businessJson);
+        if (business.tplId === input.templateId && business.billNo === 'znbzbx_expensebill') requests.add(params.requestId);
+      } catch { /* The browser can omit large request bodies from its event buffer. */ }
+    }
+    if (method === 'Network.responseReceived' && requests.has(params.requestId) &&
+        params.response.url.split('?')[0] === endpoint.href) {
+      return { ...result, savePost: { method: 'POST', path, templateId: input.templateId, status: params.response.status } };
+    }
+  }
+  return result;
 }
 
 export async function verifyModel(task, page, input) {
   const reader = await task.newPage();
   await reader.goto(input.designerUrl);
   return until(() => reader.evaluate(designerModel, input), 'reopened designer field model');
+}
+
+// Keep the scalar required-field result used by existing MCP callers and runs.
+function requiredValue(result) {
+  if (result.status) return result;
+  const { values, matches, changed, ...identity } = result;
+  return { ...identity, required: values['UI#required'] };
+}
+
+export async function locate(task, page, input) {
+  return requiredValue(await locateModel(task, page, { ...input, desired: { 'UI#required': true } }));
+}
+
+export async function update(task, page, target) {
+  return updateModel(task, page, { ...target, desired: { 'UI#required': target.desired } });
+}
+
+export async function verify(task, page, target) {
+  const rows = await page.evaluate(templateRows, { templateId: target.templateId, templateName: target.templateName,
+    transactionType: target.transactionType });
+  if (rows.length !== 1) throw new Error('Template identity changed before verification');
+  return { ...rows[0], ...requiredValue(await verifyModel(task, page, { ...target, desired: { 'UI#required': true } })) };
 }
