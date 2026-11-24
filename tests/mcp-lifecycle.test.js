@@ -63,7 +63,7 @@ async function waitForExecution(client, runId, executionId) {
   assert.fail(`execution ${executionId} did not settle`);
 }
 
-test('MCP exposes eight tools and completes a verified memory workflow with idempotent requests', async t => {
+test('MCP exposes nine tools and completes a verified memory workflow with idempotent requests', async t => {
   const dataDir = temporaryDirectory();
   const { adapter, calls } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
@@ -71,7 +71,7 @@ test('MCP exposes eight tools and completes a verified memory workflow with idem
 
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
+    'asp_ui_template_update_field', 'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
   ]);
 
   const beginArgs = {

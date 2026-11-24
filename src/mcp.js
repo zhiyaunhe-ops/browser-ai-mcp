@@ -5,6 +5,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const { createService } = require('./service');
+const { updateTemplateField } = require('./asp-template');
 const packageInfo = require('../package.json');
 
 const text = z.string().min(1);
@@ -32,6 +33,10 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
+  register('asp_ui_template_update_field', 'Set required on one ASP UAT PC general reimbursement header field. Provide the exact template name or ID and the field label or code. Returns candidates on ambiguity or the old and independently reopened value. Reuse requestId when resuming.', {
+    requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
+    field: text, changes: z.object({ required: z.boolean() }).strict()
+  }, args => updateTemplateField(service, args));
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
   }, args => service.begin(args));

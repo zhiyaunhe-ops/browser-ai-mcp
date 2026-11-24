@@ -39,6 +39,19 @@ npm ci
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
 
+ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 All Seasons Property 工作台，按模板名称或 ID 和字段名称或编码修改 PC 通用报销单的表头必填属性。可用 `transactionType` 指定交易类型。重试同一操作时沿用原 `requestId`。
+
+```json
+{
+  "requestId": "training-meeting-reason-required-1",
+  "templateName": "Training / Meeting Reimbursement",
+  "field": "报销说明",
+  "changes": { "required": true }
+}
+```
+
+返回值包含模板 ID、交易类型、字段编码、修改前后的布尔值和独立回读的观察记录 ID。当前值已经符合要求时跳过保存，仍会重新打开设计器核对。
+
 ## 页面提醒
 
 每轮 `browser_run` 成功后，MCP 按本轮操作的页面匹配已保存的提醒。例如费用导入和导入结果共用一个网址时，可以分别按弹窗标题保存两条提醒。命中的摘要随执行结果的 `pageMemos` 返回，异步执行可从 `run_get` 读取同一结果。打开弹窗后结束这一轮，下一轮准备文件或提交时就能用到提醒。
