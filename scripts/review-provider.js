@@ -6,7 +6,10 @@ const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { createMcpServer } = require('../src/mcp');
 const { createService } = require('../src/service');
 
-const actions = new Set(['eval_pending', 'eval_packet', 'evidence_query', 'eval_submit', 'run_summary']);
+const actions = new Set([
+  'eval_pending', 'eval_packet', 'evidence_query', 'eval_submit', 'run_summary', 'eval_session_context',
+  'review_improve', 'review_apply', 'review_improvements', 'review_history', 'review_observe',
+]);
 
 async function call({ action, arguments: args }) {
   if (!actions.has(action)) throw new Error(`Unknown review provider action: ${action}`);
