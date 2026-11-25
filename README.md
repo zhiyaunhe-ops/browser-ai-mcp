@@ -113,7 +113,32 @@ npm ci
 
 用友基础配置按产品版本复用。ASP 项目费控模块使用同一个标签 `domain_tag: "超级版和旗舰版"`，涵盖报销模板、字段属性、公式和相关查询。执行端在 `run_begin` 指定版本或通过已识别的 ASP 费控任务自动归类。`memory_search` 和新任务的 `recalledMemory` 可按相同版本找回适用的流程和评估经验。切换环境后，当前租户的模板 ID、权限和字段状态以新运行的读取结果为准。
 
-若另装了完整 Toolkit，评估发现需要建立改进任务时，可使用它的 `task_review_improve` 指定来源评估、改动对象、改法和验收条件。工具返回可跟进的任务编号。改动类型可选业务配置、工具实现或操作流程；`task_review_observe` 记录后续运行实际测到的效果。
+### 从评估到改进和复验
+
+评估 AI 在 `eval_submit.improvements` 中写下可执行的问题、改法和可观察的验收条件，提交后会得到 `improvementIds`。也可以对已有评估调用 `review_improve`。换一个 AI 接手时，用 `review_improvements` 按原评估、问题或状态找回待做事项。
+
+| 改动类型 | AI 实施的动作 | MCP 核对的产物 |
+| --- | --- | --- |
+| `code` | 在授权仓库修改实现，增加相应回归用例 | 本地 Git 提交实际变动的文件及 blob |
+| `script` | 新增或修订可复用脚本并提交 | 脚本路径、提交和 blob |
+| `memory` | 通过 `review_apply` 写入记忆条目或按已有 revision 修订 | 实际保存的 memory ID 和新 revision |
+| `request` | 依据原运行捕获的请求构造参数化请求，保留业务回读，再提交实现 | 构造器文件、提交和同一运行中原生捕获的请求记录 |
+
+例如，评估发现已有脚本把“保存请求返回成功”当作“字段已经更新”，可在该评估的 `improvements` 数组中加入以下一项。
+
+```json
+{
+  "kind": "script",
+  "problemId": "saved-field-readback",
+  "change": "在保存后重新查询目标记录，并返回实际字段值",
+  "criterion": {"id": "persisted", "path": "persisted", "equals": true}
+}
+```
+
+1. 实施后调用 `review_apply({improvementId,requestId,artifact:{repository,commit,file,prUrl}})`。传入工作树绝对路径、完整提交号和相对文件名，PR 链接可选；请求构造器还要传 `evidenceId`。记忆改动传 `artifact.memoryUpdate`，沿用 `baseRevision` 和 `entry` 或 `memoryId + patch` 的格式。
+2. 在新运行的 `run_begin` 中传 `improvement:{improvementId,version}` 及原验收条件。实际使用交付版本，再独立回读业务结果。文件类改动的回读同时返回从已加载实现取得的 `improvementVersion`；记忆改动在 `run_finish.usedMemoryIds` 中引用实际使用的条目。请求构造器还需留下新运行的原生请求记录。
+3. 评估 AI 提交新运行的 `eval_submit`。同一版本满足验收条件并有对应回读后，该项进入 `verified`。失败或证据不足会留下尝试记录，状态保留为 `applied`；修订交付物时传当前 `expectedVersion`，再按新版本复验。
+4. 通过 PR 交付可复用改动，附上问题编号、版本和复验运行。后续多个真实案例的效果，可继续用 `review_observe` 跟踪。
 
 ### 记录请求与复用
 

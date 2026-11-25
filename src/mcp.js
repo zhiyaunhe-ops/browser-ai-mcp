@@ -6,6 +6,7 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { z } = require('zod');
 const { createService } = require('./service');
 const { registerEvaluationTools, reviewMemorySchema, sessionSource } = require('./evaluation');
+const { link: improvementLink } = require('./improvements');
 const { updateTemplateField } = require('./asp-template');
 const { verifyTemplateBatch } = require('./asp-template-batch');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
@@ -34,7 +35,7 @@ function readWorkbench(service, businessTool, method, { runId, requestId, pageLa
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。评估模型在本机用 eval_pending、eval_packet 和 eval_session_context 对照原始会话，然后 eval_submit；路径缺失时按 eval_packet.sessionSearch 主动查找本机会话。完成后建议将可复用改动和验证依据通过 PR 提交到获授权的仓库，并返回链接。用 review_history 和 review_observe 追踪改动效果。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。评估模型在本机用 eval_pending、eval_packet 和 eval_session_context 对照原始会话，然后 eval_submit；路径缺失时按 eval_packet.sessionSearch 主动查找本机会话。完成后建议将可复用改动和验证依据通过 PR 提交到获授权的仓库，并返回链接。可执行问题调用 review_improve，实施代码、记忆、脚本或请求构造改动，再用 review_apply 登记实际版本。新 run 绑定 improvement，执行、独立回读并 eval_submit，回看 review_improvements。后续样本用 review_observe。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
   const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
     description, inputSchema, outputSchema: { data: resultSchema
@@ -86,7 +87,7 @@ function createMcpServer(service = createService()) {
   }, args => verifyTemplateBatch(service, args));
   register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
-    domain_tag: domainTag, reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
+    domain_tag: domainTag, improvement: improvementLink.optional(), reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
   }, args => service.begin(args));
   register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,

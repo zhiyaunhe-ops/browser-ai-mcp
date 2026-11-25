@@ -19,6 +19,14 @@ After review, submit reusable fixes, regression cases or documented lessons thro
 
 Follow the same `problem_id` in `review_history`. Use `review_observe` for later measurements with the actual deployed version and evidence locator.
 
+## Act on evaluation findings
+
+For each actionable finding, include an item in `eval_submit.improvements` or call `review_improve` on an existing review. Identify the problem, the change and an observable criterion. Use `review_improvements` to resume open items.
+
+Implement code and scripts with the local repository tools. For a request builder, use the captured method, URL, query keys and payload structure from the source run and commit the parameterized builder. Supply the repository, exact commit and changed file to `review_apply`. Include the native request record ID for a builder. For memory, submit the actual entry or patch and its base revision to `review_apply`.
+
+Run the delivered version on a fresh task using `run_begin.improvement` and the planned criterion. Read the business result independently. Include the version observed from the running implementation in the readback's `improvementVersion` field; for memory, identify the revision used and cite the memory ID at finish. Submit the new evaluation, inspect the recorded attempt and continue any unresolved item. Deliver the reusable change by PR with the version and verification evidence.
+
 ## Find a business node
 
 1. On a Yonyou page, inspect `ys.context()` or `ys.find(name)`. Use an observed frame, control ID or scope to narrow the read.
