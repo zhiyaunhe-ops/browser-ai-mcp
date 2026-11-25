@@ -37,6 +37,8 @@ npm ci
 | 执行操作或独立读取，查询异步结果 | `browser_run`、`run_get` |
 | 在当前工作台任务中打开节点、按条件查询企业级 PC 模板 | `asp_workbench_open_node`、`asp_workbench_query_templates` |
 | 在通用申请单列表按完整单号查询 | `asp_workbench_query_general_applications` |
+| 定位和修改单个模板字段 | `asp_ui_template_update_field` |
+| 在原运行中逐项验收批量保存结果 | `asp_ui_template_verify_batch` |
 | 用后续观察核对结果并结束任务 | `run_finish` |
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
@@ -132,6 +134,7 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 ```
 
 - 配置其他单据时提供实际的 `documentName` 和模板名。同名单据可用候选里的完整 `documentPath` 确认。选择明细列时传 `fieldScope: "detail"`。多个明细表存在同名列时，通过候选返回的 `entityCode` 填写 `detailEntity`；同一实体仍有多个字段节点时，优先用候选的 `fieldId` 指定持久字段 ID。
+- 如果返回 `field_not_found`，先看 `candidates` 中的字段编码、实体、表头或明细位置和可用的持久 ID。选定候选后用新的 `requestId` 重新调用。没有精确候选时，`searchedEntities` 列出已搜索的实体、字段数和名称样本。
 - 例如，选择差旅费报销单可以传 `"documentName": "差旅费报销单", "templateName": "Travel Claim (ASP)"`；个人借款单可以传 `"documentName": "个人借款单", "templateName": "Personal Loan Slip (ASP)"`。首次使用某列时，可用 `changes: {}` 查看属性。
 - 同一单据有多个 PC 页面类型时，`pageType` 可指定工作台上的实际标签，例如“还款单列表”。只有已配置租户模板、且使用同一单据设计器字段模型的页面才能继续修改。
 - 查看培训报销模板的明细金额列时，沿用示例中的模板名，将 `field` 改为 `nexpensemny`，并传 `fieldScope: "detail"`、`detailEntity: "znbzbx_expensebill_b"` 和 `changes: {}`。
@@ -141,8 +144,38 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 - 枚举和参照编码通过设计器对应动作设置。参照字段是否允许修改编码以设计器判断为准，属性清单中的 `disabled` 会反映该限制。
 - `changes.formula` 接收用友公式表达式、`{"expression": "...", "display": "..."}` 或 `null`。设计器负责解析表达式和生成触发字段及函数清单。传 `null` 清空计算公式。
 - 同时提供 `templateId` 和工作台打开的 `designerUrl` 可全程走无点击路径。设计器 URL 内的 `PT…` 编码与工作台模板 ID 是两个不同的标识。通过模板名称或 ID 搜索时，仍由工作台打开设计器。
-- 保存及独立回读按单据编码、模板 ID、表头或明细实体、字段编码和持久字段 ID 核对；缺少持久 ID 时核对节点 ID。设计器负责构造保存 POST。请求中的单据编码和模板 ID 均与目标一致且收到对应响应时，`savePost` 返回请求方法、路径、模板 ID 和 HTTP 状态。当前值已符合要求时跳过保存。
+- 保存及独立回读按单据、模板、实体、字段编码和持久字段 ID 核对。部分扩展字段只在父节点记录模板 ID。写入前核对已选节点；重开后若节点 ID 已更新且字段没有持久 ID，在同一模板和实体中按精确字段编码唯一定位。显式指定的节点仍按指定 ID 核对。设计器负责构造保存 POST。请求中的单据编码和模板 ID 均与目标一致且收到对应响应时，`savePost` 返回请求方法、路径、模板 ID 和 HTTP 状态。当前值已符合要求时跳过保存。
 - 只传 `required` 且省略 `designerUrl` 时，`before` 和 `after` 仍是布尔值。其他模式按属性编码返回值。
+
+### 批量保存后的字段验收
+
+在 `run_begin` 中，ASP 费控配置沿用 `domain_tag: "超级版和旗舰版"`。已确定目标时，把完整清单登记为验收条件，例如 `{id:"coverage", path:"verifiedTargets", equals:targets}`。保存完成后，在原运行中调用 `asp_ui_template_verify_batch`，按原顺序传入相同的 `targets`。漏掉模板、替换字段或改变期望值都会报清单冲突。历史运行只有 `allSelectedFieldsMatch == true` 条件时，结论覆盖本次传入的清单。每个目标填写实际定位的模板 ID、设计器地址、字段和预期属性。有持久字段 ID 时一并传入。
+
+```json
+{
+  "runId": "<原批量运行 ID>",
+  "requestId": "verify-expense-fields-1",
+  "targets": [
+    {
+      "templateId": "<培训模板 ID>",
+      "designerUrl": "<培训模板设计器地址>",
+      "field": "pk_receptionarchive_matter_name",
+      "fieldScope": "detail",
+      "detailEntity": "znbzbx_expensebill_b",
+      "expected": {"bShowIt": true}
+    },
+    {
+      "templateId": "<加班餐模板 ID>",
+      "designerUrl": "<加班餐模板设计器地址>",
+      "field": "expensebillDcs__ASP_VENUE",
+      "fieldScope": "header",
+      "expected": {"bShowIt": false}
+    }
+  ]
+}
+```
+
+工具逐字段重新打开设计器。结果的 `rows` 包含目标身份、预期值、实读值、状态和可用的观察编号。全部字段匹配后，把返回的 `verification` 交给 `run_finish`。出现值不符或读取失败时，按对应行检查。原请求重试沿用 `requestId`；发生后续写入或更改验收清单后，用新 `requestId` 重新读取。
 
 ## 页面提醒
 

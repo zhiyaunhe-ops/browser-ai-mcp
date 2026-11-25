@@ -7,6 +7,7 @@ const { z } = require('zod');
 const { createService } = require('./service');
 const { registerEvaluationTools, reviewMemorySchema } = require('./evaluation');
 const { updateTemplateField } = require('./asp-template');
+const { verifyTemplateBatch } = require('./asp-template-batch');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
 const packageInfo = require('../package.json');
 
@@ -17,6 +18,14 @@ const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
 const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
 const workbenchRound = { ...idempotent, pageLabel: text.optional(), domain_tag: domainTag };
+const batchTarget = z.object({
+  templateId: text, templateName: text.optional(),
+  designerUrl: z.string().url().describe('从目标模板工作台或保存步骤取得的 PC 设计器地址。'),
+  field: text, fieldScope: z.enum(['header', 'detail']).optional(), detailEntity: text.optional(),
+  fieldId: text.optional(), fieldNid: text.optional(),
+  expected: z.record(z.unknown()).refine(value => Object.keys(value).length > 0,
+    'Provide at least one expected property.').describe('按实际属性编码填写期望值，例如 {"bShowIt":false}。')
+}).strict();
 
 function readWorkbench(service, businessTool, method, { runId, requestId, pageLabel, domain_tag, ...input }, script = workbenchScript) {
   const code = 'const workflow = await import(' + JSON.stringify(script) + '); return await workflow.' + method + '(task, page, input);';
@@ -25,7 +34,7 @@ function readWorkbench(service, businessTool, method, { runId, requestId, pageLa
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。独立评估使用 YonClaw Toolkit 的 task_eval_pending、task_eval_packet、task_eval_submit 和 task_run_summary。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。独立评估使用 YonClaw Toolkit 的 task_eval_pending、task_eval_packet、task_eval_submit 和 task_run_summary。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
   const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
     description, inputSchema, outputSchema: { data: resultSchema
@@ -56,7 +65,7 @@ function createMcpServer(service = createService()) {
   register('asp_workbench_query_general_applications', '在 ASP UAT 通用申请单列表按单号精确查找。优先复用当前页面已核实的列表请求。首次需要识别查询方案或读取失败时使用工作台查询控件，核对结果中的实际单号。通过 run_get 查看使用路径及结果完整性。', {
     ...workbenchRound, billCode: text.describe('通用申请单的完整单据编号。')
   }, args => readWorkbench(service, 'asp_workbench_query_general_applications', 'queryGeneralApplications', args, billQueryScript));
-  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。给出单据、模板名或 ID、字段名或编码；同名项返回候选。默认使用通用报销单表头。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
+  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。默认通用报销单表头。未命中时检查 candidates 的 fieldScope、detailEntity 和 fieldId，再精确指定字段；没有匹配时可查 searchedEntities。用 changes={} 读取属性，changes.properties 传属性名或编码，changes.formula 设置公式。设计器原生保存后独立回读。同一操作重试沿用 requestId，更改目标用新 requestId。', {
     requestId: text, domain_tag: domainTag, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     documentName: text.optional().describe('工作台 UI 模板树中的单据名称。默认通用报销单。'),
     documentPath: z.array(text).nonempty().optional().describe('从业务域到单据名称的完整目录路径，用于区分同名单据。'),
@@ -72,6 +81,9 @@ function createMcpServer(service = createService()) {
       properties: z.record(z.unknown()).optional().describe('键为该字段的属性编码或面板上的精确名称，值按设计器元数据填写。下拉选项使用其 value。')
     }).strict()
   }, args => updateTemplateField(service, args));
+  register('asp_ui_template_verify_batch', '在原运行最后一次批量保存后逐字段重新打开模板，记录期望、实际和 observationId。用 run_begin 的 criteria 预登记 path=verifiedTargets、equals=完整 targets，验收时原样传回清单。已有运行也可核对当次提供的清单，布尔条件为 allSelectedFieldsMatch。全部匹配后将 verification 交给 run_finish。同一请求重试沿用 requestId，新增写入后重新发起验收。', {
+    ...idempotent, targets: z.array(batchTarget).nonempty()
+  }, args => verifyTemplateBatch(service, args));
   register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
     domain_tag: domainTag, reviewMemory: reviewMemorySchema.optional()

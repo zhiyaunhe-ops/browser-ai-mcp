@@ -52,6 +52,7 @@ test('MCP updates the field, independently reads it back, and does not rewrite o
   const { client, calls } = await setup(t);
   const result = await update(client);
   assert.equal(result.status, 'updated');
+  assert.equal(result.designerUrl, 'https://example.test/designer');
   assert.equal(result.before, false);
   assert.equal(result.after, true);
   assert.equal(result.verified, true);

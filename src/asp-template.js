@@ -4,6 +4,15 @@ const { templateScript: script } = require('./asp-scripts');
 const { edition } = require('./service');
 const workbench = 'https://global.yonyoucloud.com/';
 
+function validateDesignerUrl(designerUrl) {
+  const url = URL.parse(designerUrl);
+  if (!url || url.origin !== new URL(workbench).origin ||
+      url.pathname !== '/iuap-yonbuilder-designer/ucf-wh/designer/apps/quickdev/index.html' ||
+      !/^#\/onepage\/design\/[^/?#]+\/PT\d+\/ysmdd(?:\?|$)/.test(url.hash)) {
+    throw Object.assign(new Error('Provide a PC bill designer URL from the selected workbench row'), { code: 'INVALID_ARGUMENT' });
+  }
+}
+
 async function updateTemplateField(service, input) {
   const { requestId, templateId, templateName, transactionType, field, changes, designerUrl: directUrl } = input;
   const { documentName, documentPath, pageType, fieldScope, detailEntity, fieldId, fieldNid } = input;
@@ -13,12 +22,7 @@ async function updateTemplateField(service, input) {
   if (documentName && documentPath && documentPath.at(-1) !== documentName) throw new Error('documentPath must end with documentName');
   if (detailEntity && fieldScope === 'header') throw new Error('detailEntity selects a detail table; use fieldScope "detail"');
   if (directUrl) {
-    const url = new URL(directUrl);
-    if (url.origin !== new URL(workbench).origin ||
-        url.pathname !== '/iuap-yonbuilder-designer/ucf-wh/designer/apps/quickdev/index.html' ||
-        !/^#\/onepage\/design\/[^/?#]+\/PT\d+\/ysmdd(?:\?|$)/.test(url.hash)) {
-      throw new Error('Provide a PC bill designer URL from the selected workbench row');
-    }
+    validateDesignerUrl(directUrl);
     if (!templateId || transactionType) throw new Error('Direct designer access requires templateId. Omit designerUrl to match transactionType in the workbench.');
     if (documentName || documentPath || pageType) throw new Error('Omit designerUrl to select a workbench document or page type');
   }
@@ -84,7 +88,7 @@ async function updateTemplateField(service, input) {
       await finish('cancelled', identity.status);
       return { ...runScope, ...identity };
     }
-    const target = { ...identity, designerUrl, desired };
+    const target = { ...identity, designerUrl, desired, fieldNid };
     let write;
     if (!matches) {
       write = await round('updateModel', 'execute', target, pageLabel);
@@ -93,7 +97,7 @@ async function updateTemplateField(service, input) {
     const observed = await round('verifyModel', 'observe', target);
     if (observed.state !== 'succeeded') return interrupted(observed);
     const actual = observed.result;
-    const verified = sameField(actual, identity) && actual.matches === true;
+    const verified = sameField(actual, identity, fieldNid) && actual.matches === true;
     const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
     await finish(verified ? 'succeeded' : 'failed', verified ? 'Read the field model in a fresh designer' :
       'Reopened designer did not show the requested properties', verified ? verification : []);
@@ -112,28 +116,32 @@ async function updateTemplateField(service, input) {
     await finish('cancelled', identity.status);
     return { ...runScope, ...identity };
   }
+  const target = { ...identity, designerUrl, fieldNid };
   let write;
   if (before !== required) {
-    write = await round('update', 'execute', { ...identity, designerUrl, desired: required }, pageLabel);
+    write = await round('update', 'execute', { ...target, desired: required }, pageLabel);
     if (write.state === 'outcome_unknown' && !write.executionStopped) return interrupted(write);
   }
-  const observed = await round('verify', 'observe', { ...identity, designerUrl });
+  const observed = await round('verify', 'observe', target);
   if (observed.state !== 'succeeded') return interrupted(observed);
   const actual = observed.result;
-  const verified = sameField(actual, identity) && actual.required === required;
+  const verified = sameField(actual, identity, fieldNid) && actual.required === required;
   const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
   await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested field' :
     'Reopened template did not show the requested property', verified ? verification : []);
-  return { ...runScope, ...identity, before, after: actual.required ?? null, verified, observationId: observed.observationId,
+  return { ...runScope, ...identity, designerUrl, before, after: actual.required ?? null, verified, observationId: observed.observationId,
     status: verified ? write?.result?.changed ? 'updated' : before === required ? 'already_set' : 'verified' : 'verification_failed',
     ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
     ...(write?.error ? { writeError: write.error.message } : {}) };
 }
-function sameField(observed, selected) {
+function sameField(observed, selected, fieldNid) {
   // Some designers allocate fresh node IDs when reopened. Their persisted
-  // field ID identifies the same control across loads.
+  // field ID or a unique exact field code in the scoped entity can identify it.
+  if (fieldNid && observed.nid !== fieldNid) return false;
   const idKey = selected.fieldId ? 'fieldId' : 'nid';
-  return ['templateId', 'field', idKey, 'billNo', 'fieldScope', 'entityCode'].every(key =>
+  const matchedId = selected[idKey] === undefined || observed[idKey] === selected[idKey] ||
+    (!selected.fieldId && !fieldNid && observed.reopenedByFieldCode === true);
+  return matchedId && ['templateId', 'field', 'billNo', 'fieldScope', 'entityCode'].every(key =>
     selected[key] === undefined || observed[key] === selected[key]);
 }
-module.exports = { updateTemplateField };
+module.exports = { updateTemplateField, validateDesignerUrl };

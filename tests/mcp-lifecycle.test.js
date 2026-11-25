@@ -84,7 +84,7 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'run_begin', 'run_finish', 'run_get', 'run_summary',
+    'asp_ui_template_update_field', 'asp_ui_template_verify_batch', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'run_begin', 'run_finish', 'run_get', 'run_summary',
   ]);
 
   const beginArgs = {

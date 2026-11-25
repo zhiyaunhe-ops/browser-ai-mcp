@@ -220,15 +220,18 @@ class BrowserService {
     return this.run(runId);
   }
 
-  async browserRun(args) {
+  async browserRun(args, { lastWriteSequence } = {}) {
     await this.refresh(args.runId);
     const execution = this.store.transaction(() => {
+      const run = this.run(args.runId);
+      if (lastWriteSequence !== undefined && (run.lastWriteSequence ?? 0) !== lastWriteSequence) {
+        throw problem('BATCH_STALE', 'A newer write exists in this run. Use a new batch requestId after the write.');
+      }
       // A named workbench read keeps its request identity across implementation revisions.
       const identity = args.businessTool ? { requestId: args.requestId, businessTool: args.businessTool,
         pageLabel: args.pageLabel, args: args.args, ...edition(args.domain_tag) } : args;
       const request = this.request('browser_run', args.runId, identity);
       if (request.previous) return this.store.get('execution', request.previous.executionId);
-      const run = this.run(args.runId);
       if (run.feedback && run.feedback.outcome !== 'unknown' || !['active', 'needs_verification', 'awaiting_user'].includes(run.state)) throw problem('RUN_CLOSED', 'This run is already finishing or closed');
       if (run.state === 'awaiting_user' && !args.resumeAfterUserAction) throw problem('USER_ACTION_REQUIRED', 'Complete the requested browser action, then resumeAfterUserAction after user confirmation');
       required(args.code, 'code');

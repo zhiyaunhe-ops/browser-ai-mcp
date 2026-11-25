@@ -328,3 +328,106 @@ test('readback rejects a different persistent field ID even if node ID and name 
   const result = await verifyModel({ newPage: async () => page }, page, { ...target, fieldId: 'expected-id', desired: {} });
   assert.equal(result.status, 'field_not_found');
 });
+
+test('field lookup returns usable cross-scope identities without writing', async () => {
+  const { updateModel } = await import('../scripts/asp-template.mjs');
+  const billNo = 'purchase_order';
+  const detail = { nid: 'detail-node', id: 'persistent-42', uiTable: 'BillItemBase', entityCode: 'purchase_order_lines', iTplId: target.templateId, cItemName: 'department', cShowCaption: 'Department' };
+  const { page, actions } = designerPage({ billNo, nodeAttributes: detail, nodes: [detail] });
+  const { nid, entityCode, ...base } = target;
+  const result = await updateModel({}, page, { ...base, billNo, fieldScope: 'header', desired: { 'UI#required': true } });
+  assert.equal(result.status, 'field_not_found');
+  assert.deepEqual(result.candidates, [{ fieldScope: 'detail', entityCode: 'purchase_order_lines', detailEntity: 'purchase_order_lines', field: 'department', fieldName: 'Department', nid: 'detail-node', fieldId: 'persistent-42' }]);
+  assert.deepEqual(actions, []);
+});
+
+test('field lookup describes searched entities when no exact candidate exists', async () => {
+  const { locateModel } = await import('../scripts/asp-template.mjs');
+  const billNo = 'purchase_order';
+  const header = { nid: 'header-node', uiTable: 'BillItemBase', entityCode: billNo, iTplId: target.templateId, cItemName: 'department', cShowCaption: 'Department' };
+  const detail = { ...header, nid: 'detail-node', entityCode: 'purchase_order_lines', cItemName: 'amount', cShowCaption: 'Amount' };
+  const { page } = designerPage({ billNo, nodes: [header, detail] });
+  const result = await locateModel({ page: () => page }, page, { designerUrl, templateId: target.templateId, field: 'missing', desired: {} });
+  assert.equal(result.status, 'field_not_found');
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.searchedEntities, [
+    { fieldScope: 'header', entityCode: billNo, fieldCount: 1, sampleFields: [{ field: 'department', fieldName: 'Department' }] },
+    { fieldScope: 'detail', entityCode: 'purchase_order_lines', fieldCount: 1, sampleFields: [{ field: 'amount', fieldName: 'Amount' }] },
+  ]);
+});
+
+test('template fields inherit template identity when their own iTplId is absent', async () => {
+  const { locateModel } = await import('../scripts/asp-template.mjs');
+  const dynamic = { nid: 'dynamic-node', uiTable: 'BillItemBase', entityCode: target.billNo, cItemName: 'dynamic_field', cShowCaption: 'Dynamic field' };
+  const { page } = designerPage({ nodes: [dynamic], nodeId: dynamic.nid, nodeAttributes: dynamic });
+  const result = await locateModel({ page: () => page }, page, { designerUrl, templateId: target.templateId, field: 'dynamic_field', desired: {} });
+  assert.equal(result.nid, 'dynamic-node');
+  assert.equal(result.field, 'dynamic_field');
+  assert.equal(result.templateId, target.templateId);
+});
+
+test('template field lookup excludes fields nested in another template', async () => {
+  const { locateModel } = await import('../scripts/asp-template.mjs');
+  const dynamic = { nid: 'other-node', uiTable: 'BillItemBase', entityCode: target.billNo, cItemName: 'dynamic_field', cShowCaption: 'Dynamic field' };
+  const { page } = designerPage({ nodes: [] });
+  page.evaluate = async (fn, arg) => {
+    const oldWindow = global.window;
+    const oldDocument = global.document;
+    const tools = new Map([['ai.page.save', {}]]);
+    global.window = { ydf: { scene: { yonCodePanelModel: { _aiTools: tools }, aiPageSave() {} } }, yyds: { getGlobalData: () => ({ cBillNo: target.billNo, children: [
+      { uiTable: 'BillTemplateBase', iTplId: target.templateId, children: [] },
+      { uiTable: 'BillTemplateBase', iTplId: 'other', children: [dynamic] },
+    ] }) } };
+    global.document = { title: 'Expense - 单据设计器' };
+    try { return await fn(arg); } finally { global.window = oldWindow; global.document = oldDocument; }
+  };
+  const result = await locateModel({ page: () => page }, page, { designerUrl, templateId: target.templateId, field: 'dynamic_field', desired: {} });
+  assert.equal(result.status, 'field_not_found');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('readback uniquely resolves an ID-less field in the same entity after nid changes', async () => {
+  const { verifyModel } = await import('../scripts/asp-template.mjs');
+  const node = { nid: 'new-node', id: '', iTplId: '', uiTable: 'BillItemBase', entityCode: target.billNo, cItemName: target.field, cShowCaption: 'Department' };
+  const { page } = designerPage({ nodeId: node.nid, nodeAttributes: node, nodes: [node] });
+  const result = await verifyModel({ newPage: async () => page }, page, { ...target, desired: {} });
+  assert.equal(result.nid, 'new-node');
+  assert.equal(result.reopenedByFieldCode, true);
+});
+
+test('readback does not substitute an explicitly selected nid or choose among duplicate codes', async () => {
+  const { verifyModel } = await import('../scripts/asp-template.mjs');
+  const node = { nid: 'new-node', id: '', iTplId: '', uiTable: 'BillItemBase', entityCode: target.billNo, cItemName: target.field, cShowCaption: 'Department' };
+  for (const [nodes, extra] of [[[node], { fieldNid: 'original-node' }], [[node, { ...node, nid: 'another-node' }], {}]]) {
+    const { page } = designerPage({ nodeId: node.nid, nodeAttributes: node, nodes });
+    const result = await verifyModel({ newPage: async () => page }, page, { ...target, ...extra, desired: {} });
+    assert.notEqual(result.matches, true);
+    assert.ok(['field_not_found', 'ambiguous_field'].includes(result.status));
+  }
+});
+
+test('template lookup excludes a leaf with a conflicting explicit template ID', async () => {
+  const { locateModel } = await import('../scripts/asp-template.mjs');
+  const node = { nid: 'other-node', iTplId: 'other', uiTable: 'BillItemBase', entityCode: target.billNo, cItemName: 'dynamic_field' };
+  const { page } = designerPage({ nodes: [node] });
+  const result = await locateModel({ page: () => page }, page, { designerUrl, templateId: target.templateId, field: 'dynamic_field', desired: {} });
+  assert.equal(result.status, 'field_not_found');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('batch workflow opens a fresh designer, reads actual values and closes without writing', async () => {
+  const { verifyBatchField } = await import('../scripts/asp-template.mjs');
+  const properties = [{ code: 'bShowIt', name: '显示', value: false, isNormal: true, disabled: false }];
+  const { page, actions } = designerPage({ properties });
+  const events = [];
+  page.goto = async url => { events.push(['goto', url]); };
+  page.events = async () => { events.push(['events']); return []; };
+  page.close = async () => { events.push(['close']); };
+  const selection = { templateId: target.templateId, designerUrl, field: target.field, fieldScope: 'header', expected: { bShowIt: false } };
+  const result = await verifyBatchField({ newPage: async () => { events.push(['newPage']); return page; } }, null, { index: 0, target: selection, previousRows: [], targets: [selection] });
+  assert.equal(result.allSelectedFieldsMatch, true);
+  assert.deepEqual(result.rows[0].actual, { bShowIt: false });
+  assert.equal(result.rows[0].status, 'matched');
+  assert.deepEqual(events, [['newPage'], ['goto', designerUrl], ['events'], ['close']]);
+  assert.deepEqual(actions, []);
+});

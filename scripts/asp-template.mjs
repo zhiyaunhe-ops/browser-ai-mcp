@@ -81,38 +81,75 @@ async function designerModel(input) {
   const fieldScope = input.fieldScope ?? 'header';
   const entities = tree.children.find(node => node.uiTable === 'BillEntityBaseList');
   const headerEntity = entities?.children?.find(node => node.bMain === true)?.cCode ?? billNo;
-  const matchesScope = node => node.entityCode && (node.entityCode === headerEntity ? 'header' : 'detail') === fieldScope &&
+  const scopeOf = node => node.entityCode === headerEntity ? 'header' : 'detail';
+  const matchesScope = node => scopeOf(node) === fieldScope &&
     (!input.detailEntity || node.entityCode === input.detailEntity) &&
     (!input.entityCode || node.entityCode === input.entityCode);
   const fieldIdOf = node => node.id ? String(node.id) : undefined;
+  const matchesName = node => [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field);
+  const reopenByFieldCode = input.reopened && !input.write && input.nid && !input.fieldId && !input.fieldNid &&
+    input.billNo && input.fieldScope && input.entityCode;
   const matchesIdentity = node => {
     if (input.fieldId && fieldIdOf(node) !== input.fieldId) return false;
+    if (input.fieldNid && node.nid !== input.fieldNid) return false;
     if (input.nid) {
       // The designer can assign a new nid each time it opens a stored field.
-      return (input.fieldId || node.nid === input.nid) && node.cItemName === input.field;
+      return (input.fieldId || reopenByFieldCode || node.nid === input.nid) && node.cItemName === input.field;
     }
-    return (!input.fieldNid || node.nid === input.fieldNid) &&
-      [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field);
+    return matchesName(node);
   };
-  const matches = [];
-  function visit(node) {
+  const fields = [];
+  function visit(node, inTemplate = false) {
     if (node.isDeleted) return;
-    if (node.uiTable === 'BillItemBase' && node.nid && node.cItemName &&
-        String(node.iTplId) === input.templateId && matchesScope(node) &&
-        matchesIdentity(node)) {
-      matches.push(node);
+    if (node.uiTable === 'BillTemplateBase') {
+      if (String(node.iTplId) !== input.templateId) return;
+      inTemplate = true;
     }
-    node.children?.forEach(visit);
+    // Custom fields can inherit their template from the enclosing designer node.
+    const belongsToTemplate = node.iTplId == null || node.iTplId === ''
+      ? inTemplate
+      : String(node.iTplId) === input.templateId;
+    if (node.uiTable === 'BillItemBase' && node.nid && node.cItemName && node.entityCode &&
+        belongsToTemplate) {
+      fields.push(node);
+    }
+    node.children?.forEach(child => visit(child, inTemplate));
   }
   visit(template ?? tree);
-  const identify = node => ({ fieldScope, entityCode: node.entityCode, field: node.cItemName,
-    fieldName: node.cShowCaption || node.cCaption || node.uititle || node.cItemName, nid: node.nid,
+  const matches = fields.filter(node => matchesScope(node) && matchesIdentity(node));
+  const fieldNameOf = node => node.cShowCaption || node.cCaption || node.uititle || node.cItemName;
+  const identify = node => ({ fieldScope: scopeOf(node), entityCode: node.entityCode, field: node.cItemName,
+    fieldName: fieldNameOf(node), nid: node.nid,
     ...(fieldIdOf(node) ? { fieldId: fieldIdOf(node) } : {}) });
   if (matches.length !== 1) {
-    return { status: matches.length ? 'ambiguous_field' : 'field_not_found', candidates: matches.map(identify) };
+    // A candidate outside the selection can only be used in a new lookup.
+    const candidates = (matches.length ? matches : fields.filter(node =>
+      matchesName(node) || (input.fieldId && fieldIdOf(node) === input.fieldId))).map(node => {
+      const identity = identify(node);
+      const needsNid = !identity.fieldId && fields.some(other =>
+        other !== node && other.entityCode === node.entityCode && other.cItemName === node.cItemName);
+      return { ...identity,
+        ...(identity.fieldScope === 'detail' ? { detailEntity: identity.entityCode } : {}),
+        ...(needsNid ? { fieldNid: identity.nid } : {}) };
+    });
+    const result = { status: matches.length ? 'ambiguous_field' : 'field_not_found', candidates };
+    if (candidates.length) return result;
+
+    const searchedEntities = new Map();
+    for (const node of fields) {
+      const { entityCode, cItemName } = node;
+      if (!searchedEntities.has(entityCode)) {
+        searchedEntities.set(entityCode, { fieldScope: scopeOf(node), entityCode, fieldCount: 0, sampleFields: [] });
+      }
+      const entity = searchedEntities.get(entityCode);
+      entity.fieldCount++;
+      if (entity.sampleFields.length < 5) entity.sampleFields.push({ field: cItemName, fieldName: fieldNameOf(node) });
+    }
+    return { ...result, searchedEntities: [...searchedEntities.values()] };
   }
   const identity = { templateId: input.templateId, templateName, billNo, ...identify(matches[0]) };
   const { nid } = identity;
+  if (reopenByFieldCode && nid !== input.nid) identity.reopenedByFieldCode = true;
   const props = scene.propSettingModel;
   const hasFieldPanel = () => props.innerTplNode?.nid === nid && props.innerCompMeta;
   if (!hasFieldPanel()) {
@@ -179,7 +216,8 @@ async function designerModel(input) {
   const desired = new Map();
   for (const [key, value] of Object.entries(input.desired)) {
     let prop = getProp(key);
-    if (!prop) {
+    if (input.exactPropertyCodes && prop?.code !== key) prop = undefined;
+    if (!prop && !input.exactPropertyCodes) {
       const named = properties.filter(item => item.name === key);
       if (named.length > 1) throw new Error('Ambiguous field property name: ' + key + ' (' + named.map(item => item.code).join(', ') + ')');
       [prop] = named;
@@ -297,7 +335,7 @@ export async function updateModel(task, page, input) {
 export async function verifyModel(task, page, input) {
   const reader = await task.newPage();
   await reader.goto(input.designerUrl);
-  return until(() => reader.evaluate(designerModel, input), 'reopened designer field model');
+  return until(() => reader.evaluate(designerModel, { ...input, reopened: true }), 'reopened designer field model');
 }
 
 // Keep the scalar required-field result used by existing MCP callers and runs.
@@ -320,4 +358,39 @@ export async function verify(task, page, target) {
     transactionType: target.transactionType });
   if (rows.length !== 1) throw new Error('Template identity changed before verification');
   return { ...rows[0], ...requiredValue(await verifyModel(task, page, { ...target, desired: { 'UI#required': true } })) };
+}
+
+export async function verifyBatchField(task, _page, { index, target, previousRows, targets }) {
+  const { templateId, templateName, designerUrl, field, fieldScope, detailEntity, fieldId, fieldNid, expected } = target;
+  const row = { index, templateId, templateName, designerUrl, field, fieldScope, detailEntity, fieldId, fieldNid,
+    expected, actual: null };
+  const desired = { ...expected };
+  if (desired.formula) {
+    desired.formula = { expression: desired.formula.expression, display: desired.formula.display ?? '' };
+  }
+  try {
+    const reader = await task.newPage();
+    try {
+      await reader.goto(designerUrl);
+      const observed = await until(() => reader.evaluate(designerModel, { templateId, templateName, field,
+        fieldScope, detailEntity, fieldId, fieldNid, desired, exactPropertyCodes: true }), 'fresh designer field model');
+      const { status, values, matches, changed: _changed, candidates, searchedEntities, ...identity } = observed;
+      Object.assign(row, { status: status ?? (matches ? 'matched' : 'mismatch'), actual: values ?? null });
+      if (identity.templateId) row.identity = identity;
+      if (candidates) row.candidates = candidates;
+      if (searchedEntities) row.searchedEntities = searchedEntities;
+    } finally {
+      // The round's network collector can drain this Page only while it is open.
+      try { await reader.events(); } catch { /* The collector reports unavailable page events. */ }
+      await reader.close();
+    }
+  } catch (error) {
+    row.status = 'read_error';
+    row.error = { message: error.message, ...(error.code ? { code: error.code } : {}) };
+  }
+  if (!previousRows) return { row };
+  const rows = [...previousRows, row];
+  const allSelectedFieldsMatch = row.status === 'matched' &&
+    previousRows.every(item => item.status === 'matched' && item.observationId);
+  return { allSelectedFieldsMatch, rows, ...(allSelectedFieldsMatch ? { verifiedTargets: targets } : {}) };
 }
