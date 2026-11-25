@@ -5,13 +5,20 @@ const path = require('node:path');
 const os = require('node:os');
 const { isDeepStrictEqual } = require('node:util');
 const { Store } = require('./storage');
-const { Memory } = require('./memory');
+const { Memory, matchesScope } = require('./memory');
 const { EgoAdapter } = require('./ego');
 const { MEMO_SHORT } = require('./memo');
 const { assertProgram } = require('./program-contract');
-const { callReviewToolkit } = require('./review-toolkit');
+const { callReviewToolkit, resolveDomainTag, resolveDomainTags } = require('./review-toolkit');
 
 const problem = (code, message, details = {}) => Object.assign(new Error(message), { code, ...details });
+const edition = domain_tag => domain_tag ? { domain_tag } : {};
+function aspProject(sourceUrl, requestId) {
+  // The global portal also hosts unrelated projects. Its origin alone does not identify ASP.
+  const host = URL.parse(sourceUrl)?.hostname;
+  return host === 'aspuat.yonyoucloud.com' ||
+    (host === 'global.yonyoucloud.com' && Boolean(requestId?.startsWith('asp-')));
+}
 const json = value => JSON.parse(JSON.stringify(value));
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -64,6 +71,38 @@ class BrowserService {
     this.ownerId = crypto.randomUUID();
     this.pending = new Map();
     this.closed = false;
+    this.classifyLegacyRuns();
+  }
+
+  classifyLegacyRuns() {
+    const candidates = this.store.legacyDomainContexts().flatMap(row => {
+      const context = { goal: row.goal, asp_project: aspProject(row.url, row.requestId), review_id: row.reviewId };
+      const tools = JSON.parse(row.namedTools);
+      if (row.requestId?.startsWith('asp-template:') && row.jsonGoal) {
+        const selection = JSON.parse(row.jsonGoal);
+        if (selection?.field && (selection.templateId || selection.templateName)) {
+          tools.push({ business_tool: 'asp_ui_template_update_field', document_name: selection.documentName,
+            document_path: Array.isArray(selection.documentPath) ? selection.documentPath : undefined });
+        }
+      }
+      return [{ runId: row.runId, input: context },
+        ...tools.map(tool => ({ runId: row.runId, input: { ...context, ...tool } }))];
+    });
+    const domainTags = resolveDomainTags(candidates.map(candidate => candidate.input));
+    const classified = new Map();
+    domainTags.forEach((tag, index) => {
+      if (tag) classified.set(candidates[index].runId, tag);
+    });
+    if (!classified.size) return;
+    this.store.transaction(() => {
+      for (const [runId, domainTag] of classified) {
+        const run = this.run(runId);
+        if (run.domain_tag) continue;
+        run.domain_tag = domainTag;
+        if (run.reviewMemory) run.reviewMemory = { ...run.reviewMemory, domain_tag: domainTag };
+        this.store.put('run', runId, run);
+      }
+    });
   }
 
   now() { return this.clock(); }
@@ -100,34 +139,55 @@ class BrowserService {
   saveRequest(request, result) {
     this.store.put('request', request.key, { id: request.key, hash: request.hash, ...result });
   }
-  record(runId, executionId, kind, payload) {
+  record({ runId, domain_tag }, executionId, kind, payload) {
     return this.store.append({ recordId: this.id(), runId, executionId: executionId || null,
       kind, producerId: 'browser-ai-mcp', streamId: runId, source: 'mcp',
-      observedAt: this.now(), receivedAt: this.now(), payload });
+      observedAt: this.now(), receivedAt: this.now(), ...edition(domain_tag), payload });
   }
 
-  begin(args) {
+  recall(url, goal, domainTag) {
+    return this.memory.search({ url, goal: goal.slice(0, 500), ...edition(domainTag) });
+  }
+
+  begin(args, domainContext) {
     return this.store.transaction(() => {
       const request = this.request('run_begin', null, args);
-      if (request.previous) return Object.assign(this.run(request.previous.runId), { memo: MEMO_SHORT });
+      if (request.previous) {
+        const run = this.run(request.previous.runId);
+        return { ...run, recalledMemory: this.recalledForEdition(run), memo: MEMO_SHORT };
+      }
       required(args.goal, 'goal');
       const url = new URL(required(args.url, 'url'));
       if (!['http:', 'https:'].includes(url.protocol)) throw problem('INVALID_ARGUMENT', 'url must use HTTP(S)');
       const criteria = args.criteria || [];
       if (!Array.isArray(criteria) || criteria.some(c => !c || typeof c.id !== 'string' || typeof c.path !== 'string' || !Object.hasOwn(c, 'equals')) ||
         new Set(criteria.map(c => c.id)).size !== criteria.length) throw problem('INVALID_ARGUMENT', 'criteria require unique id, path and equals');
-      const recalledMemory = this.memory.search({ url: url.href, goal: args.goal.slice(0, 500) });
-      for (const memoryId of args.recipeIds || []) this.memory.get(memoryId);
-      const reviewMemory = args.reviewMemory === undefined ? undefined : callReviewToolkit('normalize-memory', args.reviewMemory).memory;
+      let reviewMemory = args.reviewMemory === undefined ? undefined : callReviewToolkit('normalize-memory', args.reviewMemory).memory;
+      const context = { goal: args.goal, asp_project: aspProject(url.href, args.requestId), ...domainContext };
+      const domainTag = resolveDomainTag({ ...context, domain_tag: args.domain_tag ?? reviewMemory?.domain_tag });
+      if (reviewMemory) {
+        if (reviewMemory.domain_tag && reviewMemory.domain_tag !== domainTag &&
+            resolveDomainTag({ ...context, domain_tag: reviewMemory.domain_tag }) !== domainTag) {
+          throw problem('DOMAIN_TAG_MISMATCH', 'The review memory and run must use the same product edition');
+        }
+        reviewMemory = { ...reviewMemory, ...edition(domainTag) };
+      }
+      const recalledMemory = this.recall(url.href, args.goal, domainTag);
+      for (const memoryId of args.recipeIds || []) {
+        if (this.memory.get(memoryId).domain_tag !== domainTag) {
+          throw problem('INVALID_MEMORY', 'Memory must match the task product edition');
+        }
+      }
       const runId = this.id();
       const run = { runId, goal: args.goal, url: url.href, criteria: json(criteria),
         state: 'active', createdAt: this.now(), updatedAt: this.now(), sequence: 0,
         spaceId: null, pageLabel: 'p1', name: `browser-ai:${runId}`,
+        ...edition(domainTag),
         ...(reviewMemory ? { reviewMemory } : {}),
         recalledMemory, cleanup: { state: 'not_requested' } };
       this.store.put('run', runId, run);
       this.saveRequest(request, { runId });
-      this.record(runId, null, 'incident', { type: 'run-begin', goal: run.goal });
+      this.record(run, null, 'incident', { type: 'run-begin', goal: run.goal });
       return Object.assign(run, { memo: MEMO_SHORT });
     });
   }
@@ -165,7 +225,7 @@ class BrowserService {
     const execution = this.store.transaction(() => {
       // A named workbench read keeps its request identity across implementation revisions.
       const identity = args.businessTool ? { requestId: args.requestId, businessTool: args.businessTool,
-        pageLabel: args.pageLabel, args: args.args } : args;
+        pageLabel: args.pageLabel, args: args.args, ...edition(args.domain_tag) } : args;
       const request = this.request('browser_run', args.runId, identity);
       if (request.previous) return this.store.get('execution', request.previous.executionId);
       const run = this.run(args.runId);
@@ -176,6 +236,16 @@ class BrowserService {
       if (args.timeoutMs !== undefined && (!Number.isInteger(args.timeoutMs) || args.timeoutMs < 1000 || args.timeoutMs > 120000)) throw problem('INVALID_ARGUMENT', 'timeoutMs must be between 1000 and 120000');
       const previous = this.executions(run.runId);
       if (previous.some(e => ['queued', 'running'].includes(e.state))) throw problem('RUN_BUSY', 'An execution is already running; query run_get');
+      if (args.businessTool) {
+        const domainTag = resolveDomainTag({ goal: run.goal, domain_tag: args.domain_tag, business_tool: args.businessTool,
+          node_name: args.args?.nodeName, document_name: args.args?.documentName, document_path: args.args?.documentPath });
+        if (domainTag && run.domain_tag !== domainTag) {
+          if (run.domain_tag) throw problem('DOMAIN_TAG_MISMATCH', 'The named tool and run must use the same product edition');
+          run.domain_tag = domainTag;
+          if (run.reviewMemory) run.reviewMemory = { ...run.reviewMemory, domain_tag: domainTag };
+          run.recalledMemory = this.recall(run.url, run.goal, domainTag);
+        }
+      }
       for (const resolution of args.resolutions || []) {
         const execution = previous.find(e => e.executionId === resolution.executionId);
         const observation = this.store.get('observation', resolution.observationId);
@@ -186,7 +256,7 @@ class BrowserService {
         if (execution.resolution && !isDeepStrictEqual(execution.resolution, value)) throw problem('REQUEST_CONFLICT', 'The unknown execution already has a different resolution');
         execution.resolution = value;
         this.store.put('execution', execution.executionId, execution);
-        this.record(run.runId, execution.executionId, 'incident', { type: 'outcome-resolution', ...value });
+        this.record(run, execution.executionId, 'incident', { type: 'outcome-resolution', ...value });
       }
       const unknown = previous.filter(e => e.state === 'outcome_unknown' && !e.resolution);
       if (unknown.some(e => !e.executionStopped) || unknown.length && args.purpose !== 'observe') throw problem('OUTCOME_UNKNOWN', 'Resolve the prior execution before another write; query run_get and capture a later observation once stopped');
@@ -195,9 +265,10 @@ class BrowserService {
       const programCheck = assertProgram(args.code);
       const executionId = this.id();
       if (run.feedback) run.feedback.sequence ??= run.sequence;
-      const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url).hostname);
+      const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url), run.domain_tag);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
         sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
+        ...edition(run.domain_tag),
         ...(args.businessTool ? { businessTool: args.businessTool } : {}),
         timeoutMs: args.timeoutMs || 30000, spaceId: run.spaceId, name: run.name,
         pageLabel: args.pageLabel || run.pageLabel, resumeAfterUserAction: args.resumeAfterUserAction === true,
@@ -211,7 +282,7 @@ class BrowserService {
       this.store.put('run', run.runId, run);
       this.store.put('execution', executionId, execution);
       this.saveRequest(request, { runId: run.runId, executionId });
-      this.record(run.runId, executionId, 'execution', { phase: 'intent', sequence: execution.sequence, purpose: execution.purpose });
+      this.record(run, executionId, 'execution', { phase: 'intent', sequence: execution.sequence, purpose: execution.purpose });
       return execution;
     });
     if (execution.state === 'queued' && execution.ownerId === this.ownerId && !this.pending.has(execution.executionId)) this.launchExecution(execution);
@@ -253,7 +324,7 @@ class BrowserService {
         isDeepStrictEqual(execution.networkCapture ?? null, networkCapture)) return;
       const run = this.run(execution.runId);
       if (!execution.networkCapture && Array.isArray(networkRecords)) for (const payload of networkRecords) {
-        this.record(run.runId, executionId, 'network', payload);
+        this.record(run, executionId, 'network', payload);
       }
       Object.assign(execution, { state: result.state, result: result.result ?? null,
         error: result.error || null, executionStopped: result.executionStopped === true,
@@ -266,8 +337,10 @@ class BrowserService {
       if (result.state === 'succeeded' && execution.memo !== false && result.pageContext) {
         const url = URL.parse(result.pageContext.url);
         execution.pageMemos = [];
-        if (url && ['http:', 'https:'].includes(url.protocol) && url.hostname === new URL(run.url).hostname) {
-          execution.pageMemos = this.memory.pageMemos(url, result.pageContext.dialogTitle);
+        const runUrl = new URL(run.url);
+        if (url && ['http:', 'https:'].includes(url.protocol) &&
+            (run.domain_tag ? url.origin === runUrl.origin : url.hostname === runUrl.hostname)) {
+          execution.pageMemos = this.memory.pageMemos(url, result.pageContext.dialogTitle, run.domain_tag);
           execution.memoPageLabel = result.pageContext.pageLabel || execution.pageLabel;
         }
       }
@@ -277,17 +350,17 @@ class BrowserService {
         const observation = { observationId, runId: run.runId, executionId,
           sequence: execution.sequence, observedAt: this.now(), value: result.result ?? null };
         this.store.put('observation', observationId, observation);
-        this.record(run.runId, executionId, 'observation', observation);
+        this.record(run, executionId, 'observation', observation);
       }
       if (Array.isArray(result.result?.evidence)) for (const item of result.result.evidence) {
-        if (item && ['network', 'dom'].includes(item.kind)) this.record(run.runId, executionId, item.kind, item.payload || item);
+        if (item && ['network', 'dom'].includes(item.kind)) this.record(run, executionId, item.kind, item.payload || item);
       }
       if (result.state === 'outcome_unknown') run.state = 'needs_verification';
       if (/USER_IN_CONTROL|TASK_SPACE_INACTIVE|TASK_SPACE_UNAVAILABLE/.test(result.error?.code || '')) run.state = 'awaiting_user';
       run.updatedAt = this.now();
       this.store.put('execution', executionId, execution);
       this.store.put('run', run.runId, run);
-      this.record(run.runId, executionId, 'execution', { phase: 'result', state: execution.state,
+      this.record(run, executionId, 'execution', { phase: 'result', state: execution.state,
         sequence: execution.sequence, observationId: execution.observationId, error: execution.error });
       return execution;
     });
@@ -296,6 +369,9 @@ class BrowserService {
   executionView(execution) {
     const { code, args, result, pageMemoRead, ...view } = execution;
     return { ...view, result: small(result), resultArtifact: path.join(execution.directory, 'result.json') };
+  }
+  recalledForEdition(run) {
+    return run.recalledMemory?.domain_tag === run.domain_tag ? run.recalledMemory : undefined;
   }
   async wait(pending) {
     if (!pending || this.waitMs <= 0) return;
@@ -312,9 +388,11 @@ class BrowserService {
       if (!executions.length) throw problem('EXECUTION_NOT_FOUND', 'Execution does not belong to this run');
     } else executions = executions.slice(-(args.limit || 30));
     const records = this.store.query({ runId: run.runId, after: args.cursor || 0, limit: args.limit || 30 });
-    const { finishArguments, ...publicRun } = run;
-    return { ...publicRun, reviewState: this.reviewState(run), executionCount, executions: executions.map(e => this.executionView(e)),
-      ...records, records: records.records.map(r => ({ ...r, payload: small(r.payload) })), gaps: this.gaps(run.runId, args.executionId) };
+    const { finishArguments, recalledMemory, ...publicRun } = run;
+    return { ...publicRun, recalledMemory: this.recalledForEdition(run),
+      reviewState: this.reviewState(run), executionCount, executions: executions.map(e => this.executionView(e)),
+      ...records, records: records.records.map(r => ({ ...edition(run.domain_tag), ...r, payload: small(r.payload) })),
+      gaps: this.gaps(run.runId, args.executionId) };
   }
 
   async finish(args) {
@@ -338,7 +416,7 @@ class BrowserService {
         run.state = 'finishing';
         this.store.put('run', run.runId, run);
         this.saveRequest(request, { runId: run.runId });
-        this.record(run.runId, null, 'incident', { type: 'cleanup-retry', previousExecutionId: previous.executionId });
+        this.record(run, null, 'incident', { type: 'cleanup-retry', previousExecutionId: previous.executionId });
         return run;
       }
       if (!['succeeded', 'failed', 'unknown', 'cancelled'].includes(args.outcome)) throw problem('INVALID_ARGUMENT', 'Invalid outcome');
@@ -360,11 +438,15 @@ class BrowserService {
         }
       } else if (args.outcome !== 'unknown') evidenceIds.push(...executions.map(e => e.executionId));
       const used = args.usedMemoryIds || [];
-      const recalled = [...new Set([...(run.recalledMemory.domainRules || []), ...(run.recalledMemory.matches || []),
-        ...executions.flatMap(execution => execution.pageMemos || [])].map(m => m.id))];
+      const memoryAtStart = this.recalledForEdition(run);
+      const recalled = [...new Set([...(memoryAtStart?.domainRules || []), ...(memoryAtStart?.matches || []),
+        ...executions.filter(execution => execution.domain_tag === run.domain_tag)
+          .flatMap(execution => execution.pageMemos || [])].map(m => m.id))];
       for (const id of used) {
         const memory = this.memory.get(id);
-        if (memory.domain !== new URL(run.url).hostname) throw problem('INVALID_MEMORY', 'Used memory must match the task domain');
+        if (!matchesScope(memory, new URL(run.url), run.domain_tag)) {
+          throw problem('INVALID_MEMORY', 'Used memory must match the task knowledge domain');
+        }
       }
       if (args.decision === 'confirmed' && !used.length) throw problem('INVALID_MEMORY', 'confirmed requires usedMemoryIds');
       const updates = args.updates || [];
@@ -395,7 +477,7 @@ class BrowserService {
       run.updatedAt = this.now();
       this.store.put('run', run.runId, run);
       this.saveRequest(request, { runId: run.runId });
-      this.record(run.runId, null, 'incident', { type: 'run-feedback', ...run.feedback });
+      this.record(run, null, 'incident', { type: 'run-feedback', ...run.feedback });
       return run;
     });
     if (run.cleanup.state === 'pending') this.launchCleanup(run);
@@ -435,11 +517,16 @@ class BrowserService {
       if (result.state === 'succeeded' || result.state === 'skipped') run.state = run.outcome === 'succeeded' ? 'completed' : run.outcome;
       else run.state = 'needs_verification';
       this.store.put('run', runId, run);
-      this.record(runId, run.cleanup.executionId, 'incident', { type: 'space-cleanup', state: result.state, error: result.error });
+      this.record(run, run.cleanup.executionId, 'incident', { type: 'space-cleanup', state: result.state, error: result.error });
     });
   }
 
-  searchMemory(args) { return this.memory.search(args); }
+  searchMemory(args) {
+    const domainTag = resolveDomainTag(args.domain_tag === undefined
+      ? { goal: args.goal, asp_project: aspProject(args.url) }
+      : { domain_tag: args.domain_tag });
+    return this.memory.search({ ...args, domain_tag: domainTag });
+  }
   getMemory(args) { return this.memory.get(args.memoryId); }
   gaps(runId, executionId) {
     const executions = this.executions(runId).filter(execution => !executionId || execution.executionId === executionId);
@@ -466,19 +553,19 @@ class BrowserService {
         : gap)];
   }
   queryEvidence(args) {
-    this.run(args.runId);
+    const run = this.run(args.runId);
     if (args.view && !['records', 'trace', 'api'].includes(args.view)) throw problem('INVALID_ARGUMENT', 'view must be records, trace or api');
     const page = this.store.query({ runId: args.runId, after: args.cursor || 0, limit: args.limit || 30, executionId: args.executionId });
-    const records = page.records.map(r => ({ ...r, payload: small(r.payload) }));
+    const records = page.records.map(r => ({ ...edition(run.domain_tag), ...r, payload: small(r.payload) }));
     const gaps = this.gaps(args.runId, args.executionId);
-    if (!args.view || args.view === 'records') return { ...page, records, gaps };
+    if (!args.view || args.view === 'records') return { ...page, ...edition(run.domain_tag), records, gaps };
     const { buildTrace, discoverAPI } = require('./trace-engine');
     const rows = page.records.filter(r => ['network', 'dom'].includes(r.kind) || r.kind === 'execution' && r.payload.phase === 'intent').map(r => ({ ...r.payload,
       eventId: r.recordId, cursor: r.cursor, kind: r.kind === 'network' ? 'net' : 'user',
       ...(r.kind === 'dom' ? { type: 'dom-change' } : {}),
       ...(r.kind === 'execution' ? { type: 'action-start', action: 'script-round', actor: 'agent' } : {}),
       sessionId: r.runId, commandId: r.executionId, seq: r.cursor, t: r.payload.t ?? r.observedAt }));
-    return { ...page, records, projection: args.view === 'api' ? discoverAPI(rows) : buildTrace(rows),
+    return { ...page, ...edition(run.domain_tag), records, projection: args.view === 'api' ? discoverAPI(rows) : buildTrace(rows),
       gaps: [...gaps, ...((args.cursor || page.hasMore) ? [{ kind: 'projection-window', message: 'This projection covers one evidence page; related records may be on another page' }] : [])] };
   }
   recipeRequestEvidence(runId) {
@@ -533,4 +620,4 @@ class BrowserService {
 }
 
 function createService(options) { return new BrowserService(options); }
-module.exports = { BrowserService, createService, problem };
+module.exports = { BrowserService, createService, problem, edition };

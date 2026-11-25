@@ -40,6 +40,10 @@ function routeMatches(entry, url, dialogTitle) {
     (match.dialogTitle === undefined || match.dialogTitle === dialogTitle);
 }
 
+function matchesScope(entry, url, domainTag) {
+  return entry.domain_tag === domainTag && (domainTag !== undefined || entry.domain === url.hostname);
+}
+
 function content(value) {
   return typeof value === 'string' ? Boolean(value.trim()) : Array.isArray(value) ? value.length > 0 : plain(value) ? Object.keys(value).length > 0 : Boolean(value);
 }
@@ -47,46 +51,51 @@ function content(value) {
 class Memory {
   constructor(store) { this.store = store; }
 
-  pageRules(domain) {
+  pageRules(url, domainTag) {
     return this.store.list('memory').filter(entry => entry.scope === 'page' &&
-      entry.domain === domain && entry.verification !== 'stale');
+      matchesScope(entry, url, domainTag) && entry.verification !== 'stale');
   }
 
-  pageMemos(url, dialogTitle) {
-    return this.pageRules(url.hostname).filter(entry => routeMatches(entry, url, dialogTitle))
-      .map(({ id, name, summary, revision = 0, verification, sourceRunId }) => ({ id, name, summary, revision, verification, sourceRunId }));
+  pageMemos(url, dialogTitle, domainTag) {
+    return this.pageRules(url, domainTag).filter(entry => routeMatches(entry, url, dialogTitle))
+      .map(({ id, name, summary, revision = 0, verification, sourceRunId, sourceOrigin, domain_tag }) => (
+        { id, name, summary, revision, verification, sourceRunId, ...(domain_tag ? { domain_tag, sourceOrigin } : {}) }
+      ));
   }
 
-  reviewLessons(url, query, limit) {
-    if (!query.size) return [];
+  reviewLessons(url, query, limit, domainTag) {
+    if (!query.size && !domainTag) return [];
     const matches = [];
-    for (const row of this.store.currentReviewSummaries()) {
-      if (new URL(row.url).origin !== url.origin) continue;
+    for (const row of this.store.currentReviewSummaries(domainTag)) {
+      const sameOrigin = new URL(row.url).origin === url.origin;
+      if (!domainTag && !sameOrigin) continue;
       const words = terms(row.goal);
       const overlap = [...query].filter(word => words.has(word)).length;
       const shorter = Math.min(words.size, query.size);
       // A lone common word ("template", "单据") is weak evidence of a related task.
-      if (!overlap || (overlap < 2 && (query.size > 1 || words.size > 1)) || overlap * 3 < shorter) continue;
+      if (query.size && (!overlap || (overlap < 2 && (query.size > 1 || words.size > 1)) || overlap * 3 < shorter)) continue;
       const lessons = JSON.parse(row.lessons) ?? [];
       const limitations = JSON.parse(row.limitations) ?? [];
       if (!lessons.length && !limitations.length) continue;
       const compact = notes => notes.slice(0, 3).map(note => note.length > 500 ? note.slice(0, 499) + '…' : note);
-      const entry = { sourceRunId: row.sourceRunId, reviewId: row.reviewId, goal: row.goal.slice(0, 500),
-        verdict: row.verdict, lessons: compact(lessons), limitations: compact(limitations),
-        ...(row.problemId ? { problemId: row.problemId } : {}),
-        truncated: lessons.length > 3 || limitations.length > 3 || row.goal.length > 500 ||
+      const entry = { sourceRunId: row.sourceRunId, reviewId: row.reviewId,
+        ...(domainTag ? { domain_tag: domainTag } : {}),
+        ...(sameOrigin ? { goal: row.goal.slice(0, 500), verdict: row.verdict,
+          ...(row.problemId ? { problemId: row.problemId } : {}) } : {}),
+        lessons: compact(lessons), limitations: compact(limitations),
+        truncated: lessons.length > 3 || limitations.length > 3 || (sameOrigin && row.goal.length > 500) ||
           [...lessons, ...limitations].some(note => note.length > 500) };
-      matches.push({ entry, score: overlap / (query.size + words.size), submittedAt: row.submittedAt });
+      matches.push({ entry, score: query.size ? overlap / (query.size + words.size) : 0, submittedAt: row.submittedAt });
     }
     matches.sort((a, b) => b.score - a.score || b.submittedAt - a.submittedAt || a.entry.reviewId.localeCompare(b.entry.reviewId));
     return matches.slice(0, limit).map(match => match.entry);
   }
 
-  search({ url: value, goal = '', limit = 5 } = {}) {
+  search({ url: value, goal = '', limit = 5, domain_tag: domainTag } = {}) {
     const url = urlOf(value);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw fail('INVALID_MEMORY', 'limit must be 1..10');
     const query = terms(text(goal, 'goal'));
-    const candidates = this.store.list('memory').filter(entry => entry.domain === url.hostname).map(entry => {
+    const candidates = this.store.list('memory').filter(entry => matchesScope(entry, url, domainTag)).map(entry => {
       const words = terms([entry.key, entry.name, entry.goal, entry.task, entry.summary, ...(entry.aliases || [])].join(' '));
       const overlap = [...query].filter(term => words.has(term)).length;
       const route = routeMatches(entry, url);
@@ -95,11 +104,13 @@ class Memory {
     }).filter(item => item.entry.scope === 'domain' || item.route || query.size && item.overlap)
       .sort((a, b) => b.score - a.score || String(b.entry.updatedAt || '').localeCompare(String(a.entry.updatedAt || '')) || a.entry.id.localeCompare(b.entry.id));
     const selected = [...candidates.filter(item => item.entry.scope === 'domain').slice(0, limit), ...candidates.filter(item => item.entry.scope === 'page').slice(0, limit)];
-    const compact = item => ({ ...Object.fromEntries(['id', 'key', 'name', 'scope', 'summary', 'verification', 'verificationScope', 'verifiedAt', 'updatedAt', 'match', 'sourceRunId', 'evidenceAvailability']
+    const compact = item => ({ ...Object.fromEntries(['id', 'key', 'name', 'scope', 'summary', 'verification', 'verificationScope', 'verifiedAt', 'updatedAt', 'match', 'sourceRunId', 'sourceOrigin', 'domain_tag', 'evidenceAvailability']
       .filter(key => item.entry[key] !== undefined).map(key => [key, item.entry[key]])), revision: item.entry.revision ?? 0,
       applicability: item.route ? 'current-route' : 'goal-match-requires-navigation' });
-    return clone({ domain: url.hostname, domainRules: selected.filter(item => item.entry.scope === 'domain').map(compact),
-      matches: selected.filter(item => item.entry.scope === 'page').map(compact), reviewLessons: this.reviewLessons(url, query, limit),
+    return clone({ ...(domainTag ? { domain_tag: domainTag } : { domain: url.hostname }),
+      domainRules: selected.filter(item => item.entry.scope === 'domain').map(compact),
+      matches: selected.filter(item => item.entry.scope === 'page').map(compact),
+      reviewLessons: this.reviewLessons(url, query, limit, domainTag),
       total: candidates.length, truncated: selected.length < candidates.length });
   }
 
@@ -113,7 +124,9 @@ class Memory {
   prepare(input, previous, run, evidenceIds, outcome) {
     if (!plain(input)) throw fail('INVALID_MEMORY', 'memory entry must be an object');
     const url = urlOf(input.url || run.url);
-    if (url.hostname !== urlOf(run.url).hostname) throw fail('INVALID_MEMORY', 'Memory must belong to the task URL hostname');
+    const taskUrl = urlOf(run.url);
+    const sameSite = run.domain_tag ? url.origin === taskUrl.origin : url.hostname === taskUrl.hostname;
+    if (!sameSite) throw fail('INVALID_MEMORY', 'Memory must belong to the task site');
     const scope = input.scope ?? 'page';
     if (!['domain', 'page'].includes(scope)) throw fail('INVALID_MEMORY', 'scope must be domain or page');
     const key = text(input.key, 'key', 160, true);
@@ -149,7 +162,8 @@ class Memory {
     const now = new Date().toISOString();
     const available = [...new Set([...(previous?.evidenceAvailability?.available || []), ...evidenceIds])];
     const unavailable = (previous?.evidenceAvailability?.unavailable || []).filter(item => !available.includes(item.ref));
-    const entry = { ...(previous || {}), id: previous?.id || crypto.randomUUID(), domain: url.hostname, scope, key, name, summary,
+    const entry = { ...(previous || {}), id: previous?.id || crypto.randomUUID(), domain: url.hostname,
+      ...(run.domain_tag ? { domain_tag: run.domain_tag, sourceOrigin: url.origin } : {}), scope, key, name, summary,
       goal, task: goal, aliases: aliases.map(alias => text(alias, 'alias', 160, true)), match: clone(match), recipe: normalizedRecipe, evidence,
       revision: (previous?.revision ?? 0) + 1, verification, verificationScope: verification === 'verified' ? 'mcp' : 'unverified',
       updatedAt: now, sourceRunId: run.runId || run.id,
@@ -169,20 +183,25 @@ class Memory {
       let previous, input;
       if (update.memoryId !== undefined) {
         previous = this.get(update.memoryId);
+        if (previous.domain_tag !== run.domain_tag) throw fail('INVALID_MEMORY', 'Memory must match the task product edition');
         if (!plain(update.patch) || Object.keys(update.patch).some(field => !PATCH_FIELDS.has(field))) throw fail('INVALID_MEMORY', 'patch may only change editable memory fields');
         if (update.patch.recipe !== undefined && !plain(update.patch.recipe)) throw fail('INVALID_MEMORY', 'patch.recipe must be an object');
-        input = { ...previous, ...update.patch, url: `https://${previous.domain}${previous.match?.path || '/'}`,
+        const url = run.domain_tag ? run.url : `https://${previous.domain}${previous.match?.path || '/'}`;
+        input = { ...previous, ...update.patch, url,
           recipe: { ...(previous.recipe || {}), ...(update.patch.recipe || {}) }, verification: update.patch.verification ?? 'unverified' };
       } else {
         if (!plain(update.entry)) throw fail('INVALID_MEMORY', 'new memory requires an entry');
         input = { ...update.entry, url: update.entry.url || run.url };
         const url = urlOf(input.url);
-        previous = this.store.list('memory').find(entry => entry.domain === url.hostname && entry.scope === (input.scope ?? 'page') && entry.key === input.key);
+        previous = this.store.list('memory').find(entry => matchesScope(entry, url, run.domain_tag) &&
+          entry.scope === (input.scope ?? 'page') && entry.key === input.key);
       }
       const revision = previous?.revision ?? 0;
       if (!Number.isSafeInteger(update.baseRevision) || update.baseRevision < 0 || update.baseRevision !== revision) throw fail('MEMORY_REVISION_CONFLICT', 'Retrieve the current memory revision before applying changes', { currentRevision: revision, ...(previous ? { memoryId: previous.id } : {}) });
       const entry = this.prepare(input, previous, run, evidenceIds, outcome);
-      if (previous && (entry.domain !== previous.domain || entry.scope !== previous.scope || entry.key !== previous.key)) throw fail('INVALID_MEMORY', 'corrections must preserve the domain, scope and logical key');
+      if (previous && (entry.scope !== previous.scope || entry.key !== previous.key)) {
+        throw fail('INVALID_MEMORY', 'Corrections must preserve the domain, scope and logical key');
+      }
       if (!previous && this.store.list('memory').length >= 2000) throw fail('MEMORY_CAPACITY', 'Memory is limited to 2000 entries');
       this.store.put('memory', entry.id, entry);
       changed.push(entry.id);
@@ -191,4 +210,4 @@ class Memory {
   }
 }
 
-module.exports = { Memory, terms };
+module.exports = { Memory, terms, matchesScope };

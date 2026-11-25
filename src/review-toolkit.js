@@ -1,11 +1,14 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const { existsSync } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const toolkitEntry = () => process.env.BROWSER_AI_REVIEW_TOOLKIT || path.join(os.homedir(), 'yonclaw-toolkit', 'runtime', 'review.py');
+
 function callReviewToolkit(command, input, args = []) {
-  const entry = process.env.BROWSER_AI_REVIEW_TOOLKIT || path.join(os.homedir(), 'yonclaw-toolkit', 'runtime', 'review.py');
+  const entry = toolkitEntry();
   const python = process.env.BROWSER_AI_REVIEW_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
   const failure = (code, message) => Object.assign(new Error(message), { code });
   const result = spawnSync(python, ['-X', 'utf8', entry, command, ...args], {
@@ -27,4 +30,14 @@ function callReviewToolkit(command, input, args = []) {
   return response;
 }
 
-module.exports = { callReviewToolkit };
+function resolveDomainTag(input) {
+  if (input.domain_tag === undefined && !input.business_tool && !existsSync(toolkitEntry())) return undefined;
+  return callReviewToolkit('resolve-domain', input).domain_tag ?? undefined;
+}
+
+function resolveDomainTags(items) {
+  if (!items.length || !existsSync(toolkitEntry())) return [];
+  return callReviewToolkit('resolve-domains', { items }).domain_tags;
+}
+
+module.exports = { callReviewToolkit, resolveDomainTag, resolveDomainTags };

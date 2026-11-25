@@ -1,6 +1,7 @@
 'use strict';
 
 const { templateScript: script } = require('./asp-scripts');
+const { edition } = require('./service');
 const workbench = 'https://global.yonyoucloud.com/';
 
 async function updateTemplateField(service, input) {
@@ -41,9 +42,12 @@ async function updateTemplateField(service, input) {
   if (templateName) criteria.push({ id: 'template-name', path: 'templateName', equals: templateName });
   if (transactionType && !useModel) criteria.push({ id: 'transaction', path: 'transactionType', equals: transactionType });
   const run = service.begin({ requestId: 'asp-template:' + requestId, url: workbench,
+    ...edition(input.domain_tag),
     goal: JSON.stringify(useModel ? { templateId, templateName, transactionType, field, directUrl, desired, ...selection }
-      : { templateId, templateName, transactionType, field, required, ...selection }), criteria });
+      : { templateId, templateName, transactionType, field, required, ...selection }), criteria },
+  { business_tool: 'asp_ui_template_update_field', document_name: documentName, document_path: documentPath });
   const runId = run.runId;
+  const runScope = { runId, ...edition(run.domain_tag) };
 
   async function round(step, purpose, args, pageLabel = 'p1') {
     const code = 'const workflow = await import(' + JSON.stringify(script) + '); return await workflow.' + step + '(task, page, input);';
@@ -69,7 +73,7 @@ async function updateTemplateField(service, input) {
     outcome, decision: 'no-change', note, verification });
   async function interrupted(execution) {
     if (execution.state === 'failed') await finish('failed', execution.error.message);
-    return { runId, status: execution.state, error: execution.error, executionId: execution.executionId };
+    return { ...runScope, status: execution.state, error: execution.error, executionId: execution.executionId };
   }
 
   if (useModel) {
@@ -78,7 +82,7 @@ async function updateTemplateField(service, input) {
     const { designerUrl, pageLabel, values: before, properties: _properties, matches, ...identity } = lookup.result;
     if (identity.status) {
       await finish('cancelled', identity.status);
-      return { runId, ...identity };
+      return { ...runScope, ...identity };
     }
     const target = { ...identity, designerUrl, desired };
     let write;
@@ -93,7 +97,7 @@ async function updateTemplateField(service, input) {
     const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
     await finish(verified ? 'succeeded' : 'failed', verified ? 'Read the field model in a fresh designer' :
       'Reopened designer did not show the requested properties', verified ? verification : []);
-    return { runId, ...identity, designerUrl, before, after: actual.values, properties: actual.properties,
+    return { ...runScope, ...identity, designerUrl, before, after: actual.values, properties: actual.properties,
       verified, observationId: observed.observationId,
       status: verified ? write?.result?.changed ? 'updated' : write ? 'verified' :
         Object.keys(desired).length ? 'already_set' : 'inspected' : 'verification_failed',
@@ -106,7 +110,7 @@ async function updateTemplateField(service, input) {
   const { designerUrl, pageLabel, required: before, ...identity } = lookup.result;
   if (identity.status) {
     await finish('cancelled', identity.status);
-    return { runId, ...identity };
+    return { ...runScope, ...identity };
   }
   let write;
   if (before !== required) {
@@ -120,7 +124,7 @@ async function updateTemplateField(service, input) {
   const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
   await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested field' :
     'Reopened template did not show the requested property', verified ? verification : []);
-  return { runId, ...identity, before, after: actual.required ?? null, verified, observationId: observed.observationId,
+  return { ...runScope, ...identity, before, after: actual.required ?? null, verified, observationId: observed.observationId,
     status: verified ? write?.result?.changed ? 'updated' : before === required ? 'already_set' : 'verified' : 'verification_failed',
     ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
     ...(write?.error ? { writeError: write.error.message } : {}) };

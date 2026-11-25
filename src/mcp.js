@@ -11,20 +11,21 @@ const { workbenchScript, billQueryScript } = require('./asp-scripts');
 const packageInfo = require('../package.json');
 
 const text = z.string().min(1);
+const domainTag = text.optional().describe('Product edition for reusable knowledge. Use the same exact domain_tag across environments.');
 const idempotent = { runId: text, requestId: text };
 const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional() };
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
 const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
-const workbenchRound = { ...idempotent, pageLabel: text.optional() };
+const workbenchRound = { ...idempotent, pageLabel: text.optional(), domain_tag: domainTag };
 
-function readWorkbench(service, businessTool, method, { runId, requestId, pageLabel, ...input }, script = workbenchScript) {
+function readWorkbench(service, businessTool, method, { runId, requestId, pageLabel, domain_tag, ...input }, script = workbenchScript) {
   const code = 'const workflow = await import(' + JSON.stringify(script) + '); return await workflow.' + method + '(task, page, input);';
-  return service.browserRun({ runId, requestId, pageLabel, businessTool, args: input, purpose: 'observe', timeoutMs: 120000, code });
+  return service.browserRun({ runId, requestId, pageLabel, domain_tag, businessTool, args: input, purpose: 'observe', timeoutMs: 120000, code });
 }
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。独立评估模型用 eval_pending、eval_packet、eval_submit 评估和总结，用 run_summary 取结果。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。独立评估使用 YonClaw Toolkit 的 task_eval_pending、task_eval_packet、task_eval_submit 和 task_run_summary。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
   const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
     description, inputSchema, outputSchema: { data: resultSchema
@@ -56,7 +57,7 @@ function createMcpServer(service = createService()) {
     ...workbenchRound, billCode: text.describe('通用申请单的完整单据编号。')
   }, args => readWorkbench(service, 'asp_workbench_query_general_applications', 'queryGeneralApplications', args, billQueryScript));
   register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。给出单据、模板名或 ID、字段名或编码；同名项返回候选。默认使用通用报销单表头。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
-    requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
+    requestId: text, domain_tag: domainTag, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     documentName: text.optional().describe('工作台 UI 模板树中的单据名称。默认通用报销单。'),
     documentPath: z.array(text).nonempty().optional().describe('从业务域到单据名称的完整目录路径，用于区分同名单据。'),
     pageType: text.optional().describe('工作台选定单据下的 PC 页面类型名称。省略时使用该单据的默认页面。'),
@@ -73,7 +74,7 @@ function createMcpServer(service = createService()) {
   }, args => updateTemplateField(service, args));
   register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
-    reviewMemory: reviewMemorySchema.optional()
+    domain_tag: domainTag, reviewMemory: reviewMemorySchema.optional()
   }, args => service.begin(args));
   register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
@@ -84,15 +85,15 @@ function createMcpServer(service = createService()) {
   register('run_get', 'Read durable run and execution state without replaying commands. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
-  register('run_finish', 'Hand off the execution outcome and its observations for independent evaluation. Success requires a post-action readback. Omit decision and note for a routine handoff. Finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
+  register('run_finish', 'Hand off the execution outcome and its observations for independent evaluation in YonClaw Toolkit (task_eval_pending). Success requires a post-action readback. Omit decision and note for a routine handoff. Finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
     ...idempotent, outcome: z.enum(['succeeded', 'failed', 'unknown', 'cancelled']),
     verification: z.array(z.object({ criterionId: text, observationId: text })).default([]),
     decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']).optional(),
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),
     note: text.optional(), keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
-  register('memory_search', 'Recall procedures and reviewLessons relevant to the URL and goal. Use reviewId as attempt_id in review_history or use sourceRunId in evidence_query for Browser records.', {
-    url: z.string().url(), goal: z.string(), limit: z.number().int().min(1).max(10).optional()
+  register('memory_search', 'Recall procedures and reviewLessons relevant to the goal. Set domain_tag to share applicable procedures and lessons across environments of the same product edition. Use an empty goal to browse that edition’s lessons. Use sourceRunId in evidence_query for the original Browser records.', {
+    url: z.string().url(), goal: z.string(), domain_tag: domainTag, limit: z.number().int().min(1).max(10).optional()
   }, args => service.searchMemory(args));
   register('memory_get', 'Read the complete procedure, revision and provenance for one memory.', {
     memoryId: text

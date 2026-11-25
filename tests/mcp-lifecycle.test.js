@@ -668,3 +668,127 @@ test('legacy unknown handoff with a later execution is not queued for review', a
   const pending = (await invoke('eval_pending', {})).structuredContent.data;
   assert.equal(pending.runs.some(item => item.runId === run.runId), false);
 });
+
+test('review lessons follow the ASP edition across environments and isolate other editions', async t => {
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const tag = '超级版和旗舰版';
+  const url = 'https://asp-a.example.test/expense';
+  const goal = 'Configure expense control';
+  const run = await call('run_begin', { requestId: 'edition-start', url, goal, criteria: [], domain_tag: tag });
+  assert.equal(run.domain_tag, tag);
+  await call('run_finish', { runId: run.runId, requestId: 'edition-finish', outcome: 'unknown', note: 'Fixture.' });
+  assert.equal((await call('eval_packet', { runId: run.runId })).domain_tag, tag);
+  const review = await call('eval_submit', { runId: run.runId, requestId: 'edition-review', reviewKey: 'edition-finish',
+    domain_tag: tag, reviewerModel: 'reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [],
+    summary: { result: 'Unknown', lessons: ['Check configuration'], limitations: ['No readback'] } });
+  assert.equal(review.domain_tag, tag);
+  assert.equal((await call('run_summary', { runId: run.runId })).domain_tag, tag);
+  const same = await call('memory_search', { url: 'https://asp-b.example.test/expense', goal, domain_tag: tag });
+  assert.equal(same.reviewLessons[0].reviewId, review.reviewId);
+  assert.deepEqual((await call('memory_search', { url, goal, domain_tag: '其他版本' })).reviewLessons, []);
+  assert.deepEqual((await call('memory_search', { url, goal })).reviewLessons, []);
+  const later = await call('run_begin', { requestId: 'edition-later', url: 'https://asp-b.example.test/expense', goal, criteria: [], domain_tag: tag });
+  assert.equal(later.recalledMemory.reviewLessons[0].reviewId, review.reviewId);
+});
+
+test('Toolkit central eval actions read and submit a Browser handoff offline', async t => {
+  const app = process.env.YONCLAW_TOOLKIT_APP || '/home/ubuntu/yonclaw-toolkit/runtime/app.py';
+  if (!fs.existsSync(app)) return t.skip('Toolkit runtime unavailable');
+  const { spawnSync } = require('node:child_process');
+  const dataDir = temporaryDirectory();
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const provider = path.resolve(__dirname, '../scripts/review-provider.js');
+  const db = path.join(dataDir, 'tasks.sqlite');
+  const central = (action, args) => {
+    const proc = spawnSync('python3', [app, '--db', db, 'call', action], {
+      input: JSON.stringify(args), encoding: 'utf8', env: { ...process.env, BROWSER_AI_DATA_DIR: dataDir,
+        YONCLAW_BROWSER_REVIEW_PROVIDER: provider, YONCLAW_BROWSER_NODE: process.execPath },
+    });
+    assert.equal(proc.status, 0, proc.stderr);
+    return JSON.parse(proc.stdout).data;
+  };
+  const run = await call('run_begin', { requestId: 'central-start', url: 'https://example.test/', goal: 'Inspect fixture', criteria: [], domain_tag: '超级版和旗舰版' });
+  await call('run_finish', { runId: run.runId, requestId: 'central-finish', outcome: 'unknown', note: 'No readback.' });
+  assert.ok(central('eval_pending', { domain_tag: '超级版和旗舰版' }).runs.some(item => item.runId === run.runId));
+  assert.equal(central('eval_pending', { domain_tag: '其他版本' }).runs.some(item => item.runId === run.runId), false);
+  const packet = central('eval_packet', { runId: run.runId });
+  assert.equal(packet.reviewKey, 'central-finish');
+  const review = central('eval_submit', { runId: run.runId, requestId: 'central-submit', reviewKey: packet.reviewKey,
+    domain_tag: '超级版和旗舰版', reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [],
+    summary: { result: 'Unknown', lessons: [], limitations: ['No readback'] } });
+  assert.equal(review.runId, run.runId);
+  assert.equal(central('run_summary', { runId: run.runId }).review.reviewId, review.reviewId);
+  assert.ok(Array.isArray(central('evidence_query', { runId: run.runId, view: 'records' }).records));
+  assert.equal(central('eval_pending', {}).runs.some(item => item.runId === run.runId), false);
+});
+
+test('known historical ASP review is classified when an existing database is reopened', async t => {
+  const { Store } = require('../src/storage');
+  const dataDir = temporaryDirectory();
+  const runId = '9f9cb9bd-7830-4cee-8cff-980262a3de50';
+  const reviewId = '7d732627-a871-43e6-a706-56de49635276';
+  const store = new Store(dataDir);
+  store.put('run', runId, { runId, url: 'https://old.example.test/expense', goal: 'Configure expense control',
+    state: 'completed', sequence: 1, reviewId, feedback: { requestId: 'old-handoff', sequence: 1, outcome: 'failed' } });
+  store.put('evaluation', reviewId, { reviewId, runId, reviewKey: 'old-handoff', verdict: 'fail', submittedAt: 1,
+    summary: { result: 'Failed', lessons: ['Review expense settings'], limitations: ['No verification'] } });
+  store.close();
+  const service = createService({ dataDir, idFactory: identifiers() });
+  t.after(() => service.close());
+  assert.equal(service.run(runId).domain_tag, '超级版和旗舰版');
+  const recalled = service.searchMemory({ url: 'https://new.example.test/expense', goal: 'Configure expense control', domain_tag: '超级版和旗舰版' });
+  assert.equal(recalled.reviewLessons[0].reviewId, reviewId);
+});
+
+test('tagged page procedures are recalled, confirmed and corrected across environments', async t => {
+  const { adapter } = makeAdapter({ async run() { return { state: 'succeeded', result: {}, spaceId: 42,
+    pageContext: { url: 'https://second.example.test/expense', pageLabel: 'main' }, executionStopped: true }; } });
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const tag = '超级版和旗舰版';
+  const first = await call('run_begin', { requestId: 'memo-start', goal: 'Configure expense',
+    url: 'https://first.example.test/expense', criteria: [], domain_tag: tag });
+  const learned = await call('run_finish', { runId: first.runId, requestId: 'memo-learn', outcome: 'failed',
+    decision: 'learned', note: 'Save setup procedure', updates: [{ baseRevision: 0, entry: {
+      scope: 'page', key: 'expense', name: 'Expense', summary: 'Same-edition setup', match: { path: '/expense' } } }] });
+  const id = learned.feedback.changedMemoryIds[0];
+  const url = 'https://second.example.test/expense';
+  const search = await call('memory_search', { url, goal: 'Configure expense', domain_tag: tag });
+  assert.equal(search.matches[0].id, id);
+  assert.equal(search.matches[0].sourceOrigin, 'https://first.example.test');
+  assert.deepEqual((await call('memory_search', { url, goal: 'Configure expense', domain_tag: '其他版本' })).matches, []);
+  assert.deepEqual((await call('memory_search', { url, goal: 'Configure expense' })).matches, []);
+  const next = await call('run_begin', { requestId: 'memo-next', goal: 'Configure expense', url, criteria: [], domain_tag: tag });
+  const started = await call('browser_run', { runId: next.runId, requestId: 'memo-observe', purpose: 'observe', code: 'return {};' });
+  const observed = await waitForExecution(client, next.runId, started.executionId);
+  assert.equal(observed.pageMemos[0].id, id);
+  const confirmed = await call('run_finish', { runId: next.runId, requestId: 'memo-confirm', outcome: 'failed',
+    decision: 'confirmed', note: 'Used procedure', usedMemoryIds: [id] });
+  assert.ok(confirmed.feedback.recalledMemoryIds.includes(id));
+  const correctionRun = await call('run_begin', { requestId: 'memo-correct-start', goal: 'Configure expense', url, criteria: [], domain_tag: tag });
+  const current = await call('memory_get', { memoryId: id });
+  const corrected = await call('run_finish', { runId: correctionRun.runId, requestId: 'memo-correct', outcome: 'failed',
+    decision: 'corrected', note: 'Update procedure', usedMemoryIds: [id], updates: [{ memoryId: id, baseRevision: current.revision,
+      patch: { summary: 'Updated setup' } }] });
+  assert.equal(corrected.feedback.changedMemoryIds[0], id);
+  assert.equal((await call('memory_get', { memoryId: id })).summary, 'Updated setup');
+});

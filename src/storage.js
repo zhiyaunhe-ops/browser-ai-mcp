@@ -136,6 +136,11 @@ class Store {
           json_extract(r.json, '$.reviewMemory') AS preregistered_memory
         FROM entities a JOIN entities r ON r.kind = 'run' AND r.id = json_extract(a.json, '$.runId')
         WHERE a.kind = 'evaluation';
+      CREATE VIEW IF NOT EXISTS browser_review_domains_v1 AS
+        SELECT a.id AS attempt_id,
+          coalesce(json_extract(a.json, '$.domain_tag'), json_extract(r.json, '$.domain_tag')) AS domain_tag
+        FROM entities a JOIN entities r ON r.kind = 'run' AND r.id = json_extract(a.json, '$.runId')
+        WHERE a.kind = 'evaluation';
       CREATE VIEW IF NOT EXISTS browser_review_evidence_v1 AS
         SELECT o.id AS id, json_extract(o.json, '$.runId') AS run_id, o.kind AS kind,
           json_extract(o.json, '$.executionId') AS execution_id,
@@ -234,7 +239,7 @@ class Store {
     return Boolean(row?.current);
   }
 
-  pendingReviews(after, limit) {
+  pendingReviews(after, limit, domainTag) {
     // The feedback event supplies a stable cursor even when another model reviews
     // a run between pages, or an unknown outcome receives a newer handoff.
     const rows = this.db.prepare(`SELECT e.cursor, r.json FROM evidence e
@@ -245,15 +250,36 @@ class Store {
         AND (json_extract(r.json, '$.feedback.sequence') IS NOT NULL OR json_extract(r.json, '$.feedback.outcome') != 'unknown'
           OR NOT ${laterIntent})
         AND json_extract(r.json, '$.reviewId') IS NULL
-      ORDER BY e.cursor LIMIT ?`).all(after, limit + 1);
+        AND (? IS NULL OR json_extract(r.json, '$.domain_tag') = ?)
+      ORDER BY e.cursor LIMIT ?`).all(after, domainTag ?? null, domainTag ?? null, limit + 1);
     const page = rows.slice(0, limit);
     return { runs: page.map(row => {
-      const { runId, goal, outcome, feedback } = JSON.parse(row.json);
-      return { runId, goal, outcome, reviewKey: feedback.requestId };
+      const { runId, goal, outcome, feedback, domain_tag } = JSON.parse(row.json);
+      return { runId, goal, outcome, reviewKey: feedback.requestId, ...(domain_tag ? { domain_tag } : {}) };
     }), nextCursor: Number(page.at(-1)?.cursor ?? after), hasMore: rows.length > limit };
   }
 
-  currentReviewSummaries() {
+  legacyDomainContexts() {
+    return this.db.prepare(`SELECT r.id AS runId,
+      json_extract(r.json, '$.goal') AS goal,
+      json_extract(r.json, '$.url') AS url,
+      json_extract(r.json, '$.reviewId') AS reviewId,
+      (SELECT substr(q.id, 12) FROM entities q
+       WHERE q.kind = 'request' AND q.id GLOB 'run_begin::*'
+         AND json_extract(q.json, '$.runId') = r.id LIMIT 1) AS requestId,
+      (SELECT json_group_array(DISTINCT json_object(
+        'business_tool', json_extract(x.json, '$.businessTool'),
+        'node_name', json_extract(x.json, '$.args.nodeName'),
+        'document_name', json_extract(x.json, '$.args.documentName'),
+        'document_path', json_extract(x.json, '$.args.documentPath')))
+       FROM entities x WHERE x.kind = 'execution' AND json_extract(x.json, '$.runId') = r.id
+         AND json_extract(x.json, '$.businessTool') IS NOT NULL) AS namedTools,
+      CASE WHEN json_valid(json_extract(r.json, '$.goal'))
+        THEN json_extract(r.json, '$.goal') END AS jsonGoal
+      FROM entities r WHERE r.kind = 'run' AND json_extract(r.json, '$.domain_tag') IS NULL`).all();
+  }
+
+  currentReviewSummaries(domainTag) {
     return this.db.prepare(`SELECT r.id AS sourceRunId, json_extract(r.json, '$.url') AS url,
       json_extract(r.json, '$.goal') AS goal, e.id AS reviewId, json_extract(e.json, '$.verdict') AS verdict,
       json_extract(e.json, '$.submittedAt') AS submittedAt, json_extract(e.json, '$.summary.lessons') AS lessons,
@@ -262,7 +288,8 @@ class Store {
       FROM entities e JOIN entities r ON r.kind = 'run' AND r.id = json_extract(e.json, '$.runId')
       WHERE e.kind = 'evaluation' AND e.id = json_extract(r.json, '$.reviewId')
         AND json_extract(e.json, '$.reviewKey') = json_extract(r.json, '$.feedback.requestId')
-        AND coalesce(json_extract(r.json, '$.feedback.sequence'), json_extract(r.json, '$.sequence')) = json_extract(r.json, '$.sequence')`).all();
+        AND coalesce(json_extract(r.json, '$.feedback.sequence'), json_extract(r.json, '$.sequence')) = json_extract(r.json, '$.sequence')
+        AND coalesce(json_extract(e.json, '$.domain_tag'), json_extract(r.json, '$.domain_tag')) IS ?`).all(domainTag ?? null);
   }
 
   importLegacy(directory) {
