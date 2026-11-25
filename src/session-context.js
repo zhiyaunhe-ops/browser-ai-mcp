@@ -2,6 +2,26 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
+
+function sessionSearch() {
+  const home = os.homedir();
+  const codex = process.env.CODEX_HOME || path.join(home, '.codex');
+  const claude = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  const roots = [];
+  function add(client, directory) {
+    roots.push({ client, path: path.resolve(directory) });
+  }
+  for (const name of ['sessions', 'archived_sessions']) add('Codex', path.join(codex, name));
+  const buddy = process.env.YONCLAW_YONBUDDY_HOME || (process.env.APPDATA &&
+    path.join(process.env.APPDATA, 'yonyou-bridge', 'codex-home'));
+  if (buddy) {
+    for (const name of ['sessions', 'archived_sessions']) add('YonBuddy', path.join(buddy, name));
+  }
+  add('Claude Code', path.join(claude, 'projects'));
+  add('DSH', process.env.DSH_SESSIONS_ROOT || path.join(home, '.dsh', 'sessions'));
+  return { roots, instructions: 'Start with sessionSource.path. If missing or moved, actively search the matching client root and its subdirectories by session ID, then by run ID, task wording and time. Confirm the original user request and final reply before citing the file and physical lines. These are candidate paths. Read plain JSONL via eval_session_context; use a zstd-capable reader for compressed DSH logs. Record the evidence gap if no matching session is found.' };
+}
 const { createInterface } = require('node:readline');
 
 // A page carries at most 64 KiB of sampled log text, including very large tool outputs.
@@ -49,4 +69,4 @@ async function sessionContext({ path: filename, startLine = 1, limit = 10 }) {
   return { path: filename, startLine, records, nextLine, truncated };
 }
 
-module.exports = { sessionContext };
+module.exports = { sessionContext, sessionSearch };

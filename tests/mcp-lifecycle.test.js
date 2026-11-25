@@ -737,13 +737,22 @@ test('Toolkit central eval actions read and submit a Browser handoff offline', a
 });
 
 test('embedded review toolkit supports session context and browser review observations without external checkout', async t => {
-  const configuredToolkit = process.env.BROWSER_AI_REVIEW_TOOLKIT;
+  const configured = Object.fromEntries(['BROWSER_AI_REVIEW_TOOLKIT', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'DSH_SESSIONS_ROOT', 'APPDATA']
+    .map(key => [key, process.env[key]]));
   delete process.env.BROWSER_AI_REVIEW_TOOLKIT;
-  t.after(() => {
-    if (configuredToolkit === undefined) delete process.env.BROWSER_AI_REVIEW_TOOLKIT;
-    else process.env.BROWSER_AI_REVIEW_TOOLKIT = configuredToolkit;
-  });
   const dataDir = temporaryDirectory();
+  const codexHome = path.join(dataDir, 'codex-home');
+  const claudeHome = path.join(dataDir, 'claude-home');
+  const dshRoot = path.join(dataDir, 'dsh-sessions');
+  const appData = path.join(dataDir, 'appdata');
+  Object.assign(process.env, { CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: claudeHome,
+    DSH_SESSIONS_ROOT: dshRoot, APPDATA: appData });
+  t.after(() => {
+    for (const [key, value] of Object.entries(configured)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
   const { adapter } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
   const client = await withMcp(t, service);
@@ -765,12 +774,23 @@ test('embedded review toolkit supports session context and browser review observ
   assert.ok((await call('eval_pending', {})).runs.some(item => item.runId === run.runId));
   const packet = await call('eval_packet', { runId: run.runId });
   assert.deepEqual(packet.sessionSource, { path: sessionPath, sessionId: 'fixture-session', startLine: 1 });
+  assert.match(packet.sessionSearch.instructions, /session ID/);
+  for (const expected of [
+    { client: 'Codex', path: path.join(codexHome, 'sessions') },
+    { client: 'YonBuddy', path: path.join(appData, 'yonyou-bridge', 'codex-home', 'sessions') },
+    { client: 'Claude Code', path: path.join(claudeHome, 'projects') },
+    { client: 'DSH', path: dshRoot },
+  ]) assert.ok(packet.sessionSearch.roots.some(root => root.client === expected.client && root.path === path.resolve(expected.path)),
+    `missing ${expected.client} root ${expected.path}`);
   const review = await call('eval_submit', { runId: run.runId, requestId: 'embedded-review-submit', reviewKey: packet.reviewKey,
     reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [],
     summary: { result: 'Evidence is insufficient.', lessons: [], limitations: ['No business readback'] },
     sessionRefs: [{ path: sessionPath, sessionId: 'fixture-session', line: 1 }] });
   assert.deepEqual(review.sessionRefs, [{ path: sessionPath, sessionId: 'fixture-session', line: 1 }]);
-  assert.equal((await call('run_summary', { runId: run.runId })).review.reviewId, review.reviewId);
+  assert.match(review.deliveryHint, /PR/);
+  const summaryReview = (await call('run_summary', { runId: run.runId })).review;
+  assert.equal(summaryReview.reviewId, review.reviewId);
+  assert.match(summaryReview.deliveryHint, /PR/);
   assert.equal((await call('eval_pending', {})).runs.some(item => item.runId === run.runId), false);
   const first = await call('eval_session_context', { path: sessionPath, startLine: 1, limit: 1 });
   assert.equal(first.records.length, 1);

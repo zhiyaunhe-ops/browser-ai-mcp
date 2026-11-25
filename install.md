@@ -35,6 +35,8 @@ node src/mcp.js --help
 
 本机 Eval 需要 Python 3.11+。MCP 自带 YonClaw Toolkit 的评估模块；安装此仓库后，其他 AI 可以用同一个本机数据目录读取交接、提交评估并追踪后续实测。已有独立 Toolkit 的用户可用 `BROWSER_AI_REVIEW_TOOLKIT` 指定外部 `runtime/review.py`，用 `BROWSER_AI_REVIEW_PYTHON` 指定解释器。
 
+评估 AI 可从 `eval_packet.sessionSearch` 取得当前机器的候选日志目录；详见[在本机找回对应会话](README.md#在本机找回对应会话)。
+
 升级时用新版 Browser MCP 打开一次原数据目录。它为已有评估提供 `browser_review_attempts_v1` 和 `browser_review_evidence_v1` 两个只读日志视图，供 Toolkit 读取原评估、验收条件和证据引用。
 
 ## 生成本机的 MCP 配置
