@@ -973,7 +973,9 @@ test('review submission can atomically plan a memory update and verifies its sto
   const sourcePacket = await call('eval_packet', { runId: source.runId });
   const submitted = await call('eval_submit', { runId: source.runId, requestId: 'memory-source-review',
     reviewKey: sourcePacket.reviewKey, reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence',
-    criterionResults: [], evidenceIds: [], summary: { result: 'A memory update is needed.', lessons: [], limitations: [] },
+    criterionResults: [{ criterionId: criterion.id, verdict: 'insufficient_evidence',
+      reason: 'The first run only seeds the memory example.', evidenceIds: [] }],
+    evidenceIds: [], summary: { result: 'A memory update is needed.', lessons: [], limitations: [] },
     improvements: [{ kind: 'memory', problemId: 'fixture-saved-memory', change: 'Clarify how to verify the persisted saved indicator.',
       criterion }] });
   assert.equal(submitted.improvementIds.length, 1);
