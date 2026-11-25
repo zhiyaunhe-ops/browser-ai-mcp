@@ -57,6 +57,30 @@ class Memory {
       .map(({ id, name, summary, revision = 0, verification, sourceRunId }) => ({ id, name, summary, revision, verification, sourceRunId }));
   }
 
+  reviewLessons(url, query, limit) {
+    if (!query.size) return [];
+    const matches = [];
+    for (const row of this.store.currentReviewSummaries()) {
+      if (new URL(row.url).origin !== url.origin) continue;
+      const words = terms(row.goal);
+      const overlap = [...query].filter(word => words.has(word)).length;
+      const shorter = Math.min(words.size, query.size);
+      // A lone common word ("template", "单据") is weak evidence of a related task.
+      if (!overlap || (overlap < 2 && (query.size > 1 || words.size > 1)) || overlap * 3 < shorter) continue;
+      const lessons = JSON.parse(row.lessons) ?? [];
+      const limitations = JSON.parse(row.limitations) ?? [];
+      if (!lessons.length && !limitations.length) continue;
+      const compact = notes => notes.slice(0, 3).map(note => note.length > 500 ? note.slice(0, 499) + '…' : note);
+      const entry = { sourceRunId: row.sourceRunId, reviewId: row.reviewId, goal: row.goal.slice(0, 500),
+        verdict: row.verdict, lessons: compact(lessons), limitations: compact(limitations),
+        truncated: lessons.length > 3 || limitations.length > 3 || row.goal.length > 500 ||
+          [...lessons, ...limitations].some(note => note.length > 500) };
+      matches.push({ entry, score: overlap / (query.size + words.size), submittedAt: row.submittedAt });
+    }
+    matches.sort((a, b) => b.score - a.score || b.submittedAt - a.submittedAt || a.entry.reviewId.localeCompare(b.entry.reviewId));
+    return matches.slice(0, limit).map(match => match.entry);
+  }
+
   search({ url: value, goal = '', limit = 5 } = {}) {
     const url = urlOf(value);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw fail('INVALID_MEMORY', 'limit must be 1..10');
@@ -74,7 +98,8 @@ class Memory {
       .filter(key => item.entry[key] !== undefined).map(key => [key, item.entry[key]])), revision: item.entry.revision ?? 0,
       applicability: item.route ? 'current-route' : 'goal-match-requires-navigation' });
     return clone({ domain: url.hostname, domainRules: selected.filter(item => item.entry.scope === 'domain').map(compact),
-      matches: selected.filter(item => item.entry.scope === 'page').map(compact), total: candidates.length, truncated: selected.length < candidates.length });
+      matches: selected.filter(item => item.entry.scope === 'page').map(compact), reviewLessons: this.reviewLessons(url, query, limit),
+      total: candidates.length, truncated: selected.length < candidates.length });
   }
 
   get(memoryId) {

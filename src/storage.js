@@ -224,6 +224,17 @@ class Store {
     }), nextCursor: Number(page.at(-1)?.cursor ?? after), hasMore: rows.length > limit };
   }
 
+  currentReviewSummaries() {
+    return this.db.prepare(`SELECT r.id AS sourceRunId, json_extract(r.json, '$.url') AS url,
+      json_extract(r.json, '$.goal') AS goal, e.id AS reviewId, json_extract(e.json, '$.verdict') AS verdict,
+      json_extract(e.json, '$.submittedAt') AS submittedAt, json_extract(e.json, '$.summary.lessons') AS lessons,
+      json_extract(e.json, '$.summary.limitations') AS limitations
+      FROM entities e JOIN entities r ON r.kind = 'run' AND r.id = json_extract(e.json, '$.runId')
+      WHERE e.kind = 'evaluation' AND e.id = json_extract(r.json, '$.reviewId')
+        AND json_extract(e.json, '$.reviewKey') = json_extract(r.json, '$.feedback.requestId')
+        AND coalesce(json_extract(r.json, '$.feedback.sequence'), json_extract(r.json, '$.sequence')) = json_extract(r.json, '$.sequence')`).all();
+  }
+
   importLegacy(directory) {
     if (typeof directory !== 'string' || !directory.trim()) throw fail('INVALID_IMPORT_SOURCE', 'legacy directory is required');
     const sourceDirectory = path.resolve(directory);

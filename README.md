@@ -75,7 +75,7 @@ npm ci
 }
 ```
 
-`run_summary({runId})` 返回执行方的 `executionOutcome`、评估进度 `reviewState` 以及评估报告 `review`。进度依次为 `not_ready`、`pending`、`reviewed`。同一提交重试沿用 `requestId`。结果未知的任务继续执行后，需要新一次交接；提交旧证据包会收到 `EVAL_STALE`。历史运行已有 `run_finish` 交接记录的也可进入评估。评估总结单独保存，写入长期流程记忆仍沿用已有的记忆更新接口。
+`run_summary({runId})` 返回执行方的 `executionOutcome`、评估进度 `reviewState` 以及评估报告 `review`。进度依次为 `not_ready`、`pending`、`reviewed`。同一提交重试沿用 `requestId`。结果未知的任务继续执行后，需要新一次交接；提交旧证据包会收到 `EVAL_STALE`。历史运行已有 `run_finish` 交接记录的也可进入评估。评估提交后，同一站点下目标用词相近的新任务会在 `run_begin.recalledMemory.reviewLessons` 收到上次评估的经验、局限和原判定；`memory_search` 也返回同样的摘要。已有报告也参与召回。摘要里的 `sourceRunId` 可用来读取完整报告。执行模型可以据此调整查询和验收步骤。是否真的改善结果，可在下一次运行后对照业务回读和错误记录。
 
 ### 记录请求与复用
 

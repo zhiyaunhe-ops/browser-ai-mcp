@@ -571,6 +571,51 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   assert.equal(data(await call(reviewer, 'eval_pending', {})).runs.some(item => item.runId === run.runId), false);
 });
 
+test('review lessons are recalled for similar goals on the same origin in later runs', async t => {
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const url = 'https://example.test/customers';
+  const goal = 'Create customer record';
+  const initial = await call('run_begin', { requestId: 'lesson-begin', url, goal, criteria: [] });
+  assert.deepEqual(initial.recalledMemory.reviewLessons, []);
+  const execution = await call('browser_run', { runId: initial.runId, requestId: 'lesson-observe',
+    purpose: 'observe', code: 'return { ok: true };' });
+  const observation = await waitForExecution(client, initial.runId, execution.executionId);
+  await call('run_finish', { runId: initial.runId, requestId: 'lesson-finish', outcome: 'failed', note: 'Save failed.' });
+  const review = await call('eval_submit', { runId: initial.runId, requestId: 'lesson-review', reviewKey: 'lesson-finish',
+    reviewerModel: 'reviewer', verdict: 'fail', criterionResults: [], evidenceIds: [observation.observationId],
+    summary: { result: 'Save failed.', lessons: ['Check the customer form before saving.'], limitations: ['Save was not verified.'] } });
+  const expected = { sourceRunId: initial.runId, reviewId: review.reviewId, goal, verdict: 'fail',
+    lessons: ['Check the customer form before saving.'], limitations: ['Save was not verified.'], truncated: false };
+  const search = await call('memory_search', { url, goal: 'Create customer record' });
+  assert.deepEqual(search.reviewLessons, [expected]);
+  assert.equal(search.matches.some(item => item.sourceRunId === initial.runId && item.verification === 'verified'), false);
+  assert.deepEqual((await call('memory_search', { url, goal: 'Inspect inventory stock' })).reviewLessons, []);
+  assert.deepEqual((await call('memory_search', { url: 'https://other.test/customers', goal })).reviewLessons, []);
+  assert.deepEqual((await call('memory_search', { url: 'http://example.test/customers', goal })).reviewLessons, []);
+  const later = await call('run_begin', { requestId: 'later-begin', url, goal, criteria: [] });
+  assert.deepEqual(later.recalledMemory.reviewLessons, [expected]);
+
+  const uncertain = await call('run_begin', { requestId: 'uncertain-begin', url, goal: 'Inspect inventory stock', criteria: [] });
+  await call('run_finish', { runId: uncertain.runId, requestId: 'uncertain-finish', outcome: 'unknown', note: 'Outcome unknown.' });
+  const uncertainReview = await call('eval_submit', { runId: uncertain.runId, requestId: 'uncertain-review', reviewKey: 'uncertain-finish',
+    reviewerModel: 'reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [],
+    summary: { result: 'Outcome unknown.', lessons: ['Obtain a readback.'], limitations: ['No readback available.'] } });
+  const uncertainSearch = await call('memory_search', { url, goal: 'Inspect inventory stock' });
+  assert.deepEqual(uncertainSearch.reviewLessons, [{ sourceRunId: uncertain.runId, reviewId: uncertainReview.reviewId,
+    goal: 'Inspect inventory stock', verdict: 'insufficient_evidence', lessons: ['Obtain a readback.'],
+    limitations: ['No readback available.'], truncated: false }]);
+  assert.equal(uncertainSearch.matches.some(item => item.sourceRunId === uncertain.runId && item.verification === 'verified'), false);
+  await call('run_finish', { runId: uncertain.runId, requestId: 'new-handoff', outcome: 'unknown', note: 'Still unknown.' });
+  assert.deepEqual((await call('memory_search', { url, goal: 'Inspect inventory stock' })).reviewLessons, []);
+});
+
 test('legacy unknown handoff with a later execution is not queued for review', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
