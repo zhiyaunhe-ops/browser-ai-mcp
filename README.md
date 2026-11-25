@@ -42,12 +42,13 @@ npm ci
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
 | 评估模型读取待办、核对证据并保存评估 | `eval_pending`、`eval_packet`、`eval_submit` |
 | 读取某次运行的评估进度、结论和总结 | `run_summary` |
+| 按问题或尝试查看 Toolkit 统一历史与后续观测 | `review_history` |
 
 ### 执行模型和评估模型交接
 
 执行模型负责操作页面和回读业务字段。`run_finish` 接受运行结果和验收引用，日常交接可以省略 `decision` 和 `note`。成功运行仍需提供最后一次执行之后的观察。MCP 自动将已交接的任务列为 `pending`，保存证据并完成原有的页面清理。
 
-外部调度方选择评估模型，让它连接同一份 MCP 数据库。评估模型按以下步骤完成交接。
+外部调度方选择评估模型，让它连接同一份 MCP 数据库。Browser 提供证据包、核对证据归属和写后回读。Toolkit 负责通用评估规则、跨工具历史与后续观测。评估模型按以下步骤完成交接。
 
 1. 调用 `eval_pending` 获取待评估的 `runId`，也可直接使用执行方交来的 `runId`。
 2. 调用 `eval_packet({runId})` 读取目标、验收条件、操作轮次、回读结果和采集缺口。`readbacks` 单独列出验收字段的实际值及观察是否晚于最后一次执行。翻页检查 `rounds` 时传回首页的 `reviewKey` 和上一页的 `nextCursor`，需要请求细节时用 `evidence_query`。
@@ -74,6 +75,21 @@ npm ci
   }
 }
 ```
+
+在 `run_begin` 的 `reviewMemory` 字段传入以下结构，可以预登记跨轮复验计划。
+
+```json
+{
+  "problem_id": "asp-pc-template-enable",
+  "context": "ASP UAT 企业级 PC 租户模板启用",
+  "rationale": "启用请求异步完成，需要按实际模板核对结果。",
+  "prediction": "下一次同类操作能通过独立列表查询完成验收。",
+  "metric": "缺少目标模板独立回读的运行数 / 同类运行总数",
+  "evidence": "本轮和后续同类运行的 observationId"
+}
+```
+
+后续同类尝试沿用这个 `problem_id`。旧评估可用其 `reviewId` 作为 `attempt_id` 查询，例如 `review_history({source:"browser",attempt_id:"<reviewId>"})`。需要对比改进效果时，用 Toolkit 的 `task_review_observe` 追加后续实测，原始请求和观察详情仍可凭 `runId`、`executionId` 在 Browser MCP 查询。
 
 `run_summary({runId})` 返回执行方的 `executionOutcome`、评估进度 `reviewState` 以及评估报告 `review`。进度依次为 `not_ready`、`pending`、`reviewed`。同一提交重试沿用 `requestId`。结果未知的任务继续执行后，需要新一次交接；提交旧证据包会收到 `EVAL_STALE`。历史运行已有 `run_finish` 交接记录的也可进入评估。评估提交后，同一站点下目标用词相近的新任务会在 `run_begin.recalledMemory.reviewLessons` 收到上次评估的经验、局限和原判定；`memory_search` 也返回同样的摘要。已有报告也参与召回。摘要里的 `sourceRunId` 可用来读取完整报告。执行模型可以据此调整查询和验收步骤。是否真的改善结果，可在下一次运行后对照业务回读和错误记录。
 

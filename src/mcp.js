@@ -5,7 +5,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const { createService } = require('./service');
-const { registerEvaluationTools } = require('./evaluation');
+const { registerEvaluationTools, reviewMemorySchema } = require('./evaluation');
 const { updateTemplateField } = require('./asp-template');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
 const packageInfo = require('../package.json');
@@ -71,8 +71,9 @@ function createMcpServer(service = createService()) {
       properties: z.record(z.unknown()).optional().describe('键为该字段的属性编码或面板上的精确名称，值按设计器元数据填写。下拉选项使用其 value。')
     }).strict()
   }, args => updateTemplateField(service, args));
-  register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for lessons, limitations and verdicts from similar independently reviewed runs.', {
-    requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
+  register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
+    requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
+    reviewMemory: reviewMemorySchema.optional()
   }, args => service.begin(args));
   register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
@@ -90,7 +91,7 @@ function createMcpServer(service = createService()) {
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),
     note: text.optional(), keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
-  register('memory_search', 'Recall procedures and reviewLessons relevant to the URL and goal. For a review lesson, use sourceRunId with run_summary for the full review or evidence_query for its evidence.', {
+  register('memory_search', 'Recall procedures and reviewLessons relevant to the URL and goal. Use reviewId as attempt_id in review_history or use sourceRunId in evidence_query for Browser records.', {
     url: z.string().url(), goal: z.string(), limit: z.number().int().min(1).max(10).optional()
   }, args => service.searchMemory(args));
   register('memory_get', 'Read the complete procedure, revision and provenance for one memory.', {

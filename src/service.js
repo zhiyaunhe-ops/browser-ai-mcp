@@ -9,6 +9,7 @@ const { Memory } = require('./memory');
 const { EgoAdapter } = require('./ego');
 const { MEMO_SHORT } = require('./memo');
 const { assertProgram } = require('./program-contract');
+const { callReviewToolkit } = require('./review-toolkit');
 
 const problem = (code, message, details = {}) => Object.assign(new Error(message), { code, ...details });
 const json = value => JSON.parse(JSON.stringify(value));
@@ -117,10 +118,12 @@ class BrowserService {
         new Set(criteria.map(c => c.id)).size !== criteria.length) throw problem('INVALID_ARGUMENT', 'criteria require unique id, path and equals');
       const recalledMemory = this.memory.search({ url: url.href, goal: args.goal.slice(0, 500) });
       for (const memoryId of args.recipeIds || []) this.memory.get(memoryId);
+      const reviewMemory = args.reviewMemory === undefined ? undefined : callReviewToolkit('normalize-memory', args.reviewMemory).memory;
       const runId = this.id();
       const run = { runId, goal: args.goal, url: url.href, criteria: json(criteria),
         state: 'active', createdAt: this.now(), updatedAt: this.now(), sequence: 0,
         spaceId: null, pageLabel: 'p1', name: `browser-ai:${runId}`,
+        ...(reviewMemory ? { reviewMemory } : {}),
         recalledMemory, cleanup: { state: 'not_requested' } };
       this.store.put('run', runId, run);
       this.saveRequest(request, { runId });

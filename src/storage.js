@@ -120,7 +120,36 @@ class Store {
       );
       CREATE INDEX IF NOT EXISTS evidence_run_cursor ON evidence (runId, cursor);
       CREATE INDEX IF NOT EXISTS evidence_execution_cursor ON evidence (executionId, cursor);
-      CREATE INDEX IF NOT EXISTS evidence_kind_cursor ON evidence (kind, cursor);`);
+      CREATE INDEX IF NOT EXISTS evidence_kind_cursor ON evidence (kind, cursor);
+      CREATE VIEW IF NOT EXISTS browser_review_attempts_v1 AS
+        SELECT a.id AS attempt_id, r.id AS run_id,
+          json_extract(a.json, '$.submittedAt') AS submitted_at,
+          json_extract(r.json, '$.goal') AS title,
+          json_extract(r.json, '$.criteria') AS criteria,
+          CASE WHEN json_extract(r.json, '$.feedback.requestId') = json_extract(a.json, '$.reviewKey')
+            THEN json_extract(r.json, '$.feedback')
+            ELSE (SELECT h.value FROM json_each(r.json, '$.feedbackHistory') h
+                  WHERE json_extract(h.value, '$.requestId') = json_extract(a.json, '$.reviewKey')
+                  LIMIT 1)
+          END AS handoff,
+          a.json AS assessment,
+          json_extract(r.json, '$.reviewMemory') AS preregistered_memory
+        FROM entities a JOIN entities r ON r.kind = 'run' AND r.id = json_extract(a.json, '$.runId')
+        WHERE a.kind = 'evaluation';
+      CREATE VIEW IF NOT EXISTS browser_review_evidence_v1 AS
+        SELECT o.id AS id, json_extract(o.json, '$.runId') AS run_id, o.kind AS kind,
+          json_extract(o.json, '$.executionId') AS execution_id,
+          json_extract(o.json, '$.observedAt') AS observed_at,
+          json_extract(o.json, '$.sequence') AS sequence
+        FROM entities o WHERE o.kind = 'observation'
+        UNION ALL
+        SELECT e.recordId, e.runId, e.kind, e.executionId,
+          json_extract(e.json, '$.observedAt'),
+          CASE WHEN e.kind IN ('observation', 'execution') THEN json_extract(e.json, '$.payload.sequence') END
+        FROM evidence e WHERE NOT EXISTS (
+          SELECT 1 FROM entities o WHERE o.kind = 'observation' AND o.id = e.recordId
+            AND json_extract(o.json, '$.runId') = e.runId
+        );`);
   }
 
   transaction(fn) {
@@ -228,6 +257,7 @@ class Store {
     return this.db.prepare(`SELECT r.id AS sourceRunId, json_extract(r.json, '$.url') AS url,
       json_extract(r.json, '$.goal') AS goal, e.id AS reviewId, json_extract(e.json, '$.verdict') AS verdict,
       json_extract(e.json, '$.submittedAt') AS submittedAt, json_extract(e.json, '$.summary.lessons') AS lessons,
+      json_extract(e.json, '$.memory.problem_id') AS problemId,
       json_extract(e.json, '$.summary.limitations') AS limitations
       FROM entities e JOIN entities r ON r.kind = 'run' AND r.id = json_extract(e.json, '$.runId')
       WHERE e.kind = 'evaluation' AND e.id = json_extract(r.json, '$.reviewId')

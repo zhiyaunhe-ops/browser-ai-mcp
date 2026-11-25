@@ -73,6 +73,7 @@ class Memory {
       const compact = notes => notes.slice(0, 3).map(note => note.length > 500 ? note.slice(0, 499) + '…' : note);
       const entry = { sourceRunId: row.sourceRunId, reviewId: row.reviewId, goal: row.goal.slice(0, 500),
         verdict: row.verdict, lessons: compact(lessons), limitations: compact(limitations),
+        ...(row.problemId ? { problemId: row.problemId } : {}),
         truncated: lessons.length > 3 || limitations.length > 3 || row.goal.length > 500 ||
           [...lessons, ...limitations].some(note => note.length > 500) };
       matches.push({ entry, score: overlap / (query.size + words.size), submittedAt: row.submittedAt });

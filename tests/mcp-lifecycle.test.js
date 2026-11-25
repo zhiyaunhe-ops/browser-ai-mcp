@@ -15,6 +15,12 @@ function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'browser-ai-mcp-test-'));
 }
 
+// Review history must never read a developer's live Telegram or follow-up database.
+const reviewFixtures = temporaryDirectory();
+process.env.TELEGRAM_REVIEW_DB = path.join(reviewFixtures, 'telegram.sqlite');
+process.env.REVIEW_DB = path.join(reviewFixtures, 'review.sqlite');
+test.after(() => fs.rmSync(reviewFixtures, { recursive: true, force: true }));
+
 function identifiers() {
   let next = 0;
   return () => `test-id-${++next}`;
@@ -78,7 +84,7 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get', 'run_summary',
+    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'run_begin', 'run_finish', 'run_get', 'run_summary',
   ]);
 
   const beginArgs = {
@@ -542,7 +548,9 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const submission = { runId: run.runId, requestId: 'review-request', reviewKey: packet.reviewKey,
     reviewerModel: 'independent-model', verdict: 'pass', criterionResults: [{ criterionId: ' customer ', verdict: 'met',
       reason: 'Observed the customer code.', evidenceIds: [observation.observationId] }],
-    evidenceIds: [observation.observationId], summary: { result: 'Customer verified.' } };
+    evidenceIds: [observation.observationId], summary: { result: 'Customer verified.' },
+    memory: { problem_id: 'customer-lookup', context: 'Customer search', rationale: 'Verify lookup',
+      prediction: 'Customer can be found', metric: 'Lookup success', evidence: 'Customer observation' } };
   const wrongEvidence = await call(reviewer, 'eval_submit', { ...submission, requestId: 'foreign',
     evidenceIds: [foreign.observationId], criterionResults: [{ ...submission.criterionResults[0], evidenceIds: [foreign.observationId] }] });
   assert.equal(wrongEvidence.isError, true);
@@ -567,6 +575,11 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const summary = data(await call(executor, 'run_summary', { runId: run.runId }));
   assert.equal(summary.reviewState, 'reviewed');
   assert.deepEqual(summary.review, review);
+  const history = data(await call(reviewer, 'review_history', { problem_id: 'customer-lookup' }));
+  const attempt = history.problems[0].attempts.find(item => item.attempt_id === review.reviewId);
+  assert.equal(attempt.source, 'browser');
+  assert.equal(attempt.memory.prediction, 'Customer can be found');
+  assert.deepEqual(attempt.observations, []);
   assert.equal(data(await call(executor, 'run_get', { runId: run.runId })).reviewState, 'reviewed');
   assert.equal(data(await call(reviewer, 'eval_pending', {})).runs.some(item => item.runId === run.runId), false);
 });
@@ -614,6 +627,28 @@ test('review lessons are recalled for similar goals on the same origin in later 
   assert.equal(uncertainSearch.matches.some(item => item.sourceRunId === uncertain.runId && item.verification === 'verified'), false);
   await call('run_finish', { runId: uncertain.runId, requestId: 'new-handoff', outcome: 'unknown', note: 'Still unknown.' });
   assert.deepEqual((await call('memory_search', { url, goal: 'Inspect inventory stock' })).reviewLessons, []);
+});
+
+test('preregistered prediction survives handoff and cannot be rewritten in the review', async t => {
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = (name, args) => client.callTool({ name, arguments: args });
+  const data = response => { assert.notEqual(response.isError, true, JSON.stringify(response)); return response.structuredContent.data; };
+  const memory = { problem_id: 'preregistered', context: 'Fixture', rationale: 'Reason',
+    prediction: 'Expected result', metric: 'Result count', evidence: 'Initial evidence' };
+  const run = data(await call('run_begin', { requestId: 'preregister', goal: 'Inspect',
+    url: 'https://example.test/', criteria: [], reviewMemory: memory }));
+  data(await call('run_finish', { runId: run.runId, requestId: 'preregister-finish', outcome: 'unknown', note: 'Unknown' }));
+  assert.deepEqual(data(await call('eval_packet', { runId: run.runId })).reviewMemory, memory);
+  const submission = { runId: run.runId, requestId: 'preregister-submit', reviewKey: 'preregister-finish',
+    reviewerModel: 'reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [], summary: { result: 'Unknown' } };
+  const conflict = await call('eval_submit', { ...submission, memory: { ...memory, prediction: 'Different' } });
+  assert.equal(conflict.isError, true);
+  assert.equal(conflict.structuredContent.data.code, 'EVAL_MEMORY_CONFLICT');
+  const review = data(await call('eval_submit', submission));
+  assert.deepEqual(review.memory, memory);
+  assert.equal(review.memoryOrigin, 'run_begin');
 });
 
 test('legacy unknown handoff with a later execution is not queued for review', async t => {
