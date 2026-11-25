@@ -1,8 +1,6 @@
 // Runs inside the ego TaskSpace. The workbench list binds the business template
 // ID to its designer URL; the designer's PT identifier is a different key.
-const workbench = 'https://global.yonyoucloud.com/';
-const tenantTitle = 'All SEASONS PROPERTY CO., LTD';
-const defaultDocument = '通用报销单';
+const { workbench, openTemplateList } = await import('./asp-workbench.mjs' + new URL(import.meta.url).search);
 
 async function until(read, description) {
   const deadline = Date.now() + 45000;
@@ -12,111 +10,6 @@ async function until(read, description) {
     await new Promise(resolve => setTimeout(resolve, 350));
   } while (Date.now() < deadline);
   throw new Error('Timed out waiting for ' + description);
-}
-
-function documentNodes(input) {
-  const list = document.querySelector('#GZTTMP011');
-  const nodes = [...list.querySelectorAll('.wui-tree .tree-node-title[title]')];
-  const empty = list.querySelector('.search-tree-out-container .wui-empty-description');
-  if (empty?.textContent.trim() === '搜索无结果') return input.openPosition === undefined ? [] : false;
-  const query = input.documentName.toLowerCase();
-  const filtered = nodes.some(node => node.querySelector('.high-light')?.textContent.toLowerCase() === query);
-  if (!filtered) return false;
-  const matches = [];
-  for (const node of nodes) {
-    const leaf = node.closest('li');
-    if (!leaf.classList.contains('wui-tree-treenode-leaf') || node.title !== input.documentName) continue;
-    const documentPath = [];
-    for (let li = leaf; li; li = li.parentElement.closest('li')) {
-      documentPath.unshift(li.querySelector(':scope > div .tree-node-title').title);
-    }
-    if (input.documentPath && (input.documentPath.length !== documentPath.length ||
-        input.documentPath.some((name, index) => name !== documentPath[index]))) continue;
-    const link = node.closest('a');
-    if (input.openPosition === link.getAttribute('pos')) {
-      const state = { startedAt: performance.now(), loaded: false };
-      state.observer = new PerformanceObserver(entries => {
-        state.loaded ||= entries.getEntries().some(entry => entry.startTime >= state.startedAt &&
-          new URL(entry.name, location.href).pathname === '/iuap-metadata-ui/template/manage/listTenantTemplates' &&
-          entry.responseStatus === 200);
-      });
-      state.observer.observe({ type: 'resource' });
-      list[Symbol.for('asp-template-list-load')] = state;
-      link.click();
-      return true;
-    }
-    matches.push({ documentName: node.title, documentPath, position: link.getAttribute('pos') });
-  }
-  return input.openPosition === undefined ? matches : false;
-}
-
-function templateListState({ position, pageType }) {
-  const list = document.querySelector('#GZTTMP011');
-  const selected = list.querySelector('.wui-tree-treenode-selected > div > a');
-  if (selected?.getAttribute('pos') !== position) return false;
-  // The selected filters can render before the tenant-template list is refreshed.
-  const state = list[Symbol.for('asp-template-list-load')];
-  if (!state?.loaded) return false;
-  const tag = key => list.querySelector('[fieldid="mdd_templatelist|showSearchCommon|' + key + '"] .wui-tag-text')?.textContent.trim();
-  const selector = '[fieldid^="GZTTMP011|viewtype|"]';
-  const view = list.querySelector(selector + '.wui-tag-selected')?.textContent.trim();
-  if (tag('terminaltype') !== '终端类型:PC' || tag('org') !== '组织管理:企业账号级' ||
-      !view || tag('viewtype') !== '页面类型:' + view) return false;
-  if (!list.querySelector('.columnkey-tplId[role=gridcell], .noDataHelper .wui-empty')) return false;
-  // The PC terminal also offers options explicitly labeled as mobile pages.
-  const options = [...list.querySelectorAll(selector)].map(element => ({ element, name: element.textContent.trim() }))
-    .filter(({ name }) => !/[(（]移动端[)）]$/.test(name));
-  const requested = pageType ?? view;
-  const option = options.find(({ name }) => name === requested);
-  if (!option) return { status: 'page_type_not_found', candidates: options.map(({ name }) => name) };
-  if (view === requested) return { pageType: view };
-  if (state.pageTypeRequested) return false;
-  state.pageTypeRequested = true;
-  state.startedAt = performance.now();
-  state.loaded = false;
-  option.element.click();
-  return false;
-}
-
-async function openList(page, input) {
-  await page.goto(workbench);
-  const search = 'input[placeholder="人员/服务等"]';
-  await until(() => page.evaluate(s => !!document.querySelector(s), search), 'ASP workbench search');
-  if (await page.evaluate(() => document.title) !== tenantTitle) throw new Error('Expected the All Seasons Property workbench');
-  await page.fill(search, 'UI模板');
-  await until(() => page.evaluate(() => {
-    const entry = [...document.querySelectorAll('p.name')].find(el => el.textContent.trim() === 'UI模板' && el.getClientRects().length);
-    if (entry) entry.click();
-    return !!entry;
-  }), 'UI模板 search result');
-  const keyword = '#GZTTMP011 input[placeholder="请输入关键字"]';
-  await until(() => page.evaluate(s => !!document.querySelector(s) &&
-    !!document.querySelector('#GZTTMP011 .wui-tree .tree-node-title[title]'), keyword), 'template tree');
-  const documentName = input.documentName ?? input.documentPath?.at(-1) ?? defaultDocument;
-  const documentQuery = { documentName, documentPath: input.documentPath };
-  await page.fill(keyword, documentName);
-  const documents = await until(() => page.evaluate(documentNodes, documentQuery), 'filtered template tree');
-  if (documents.length !== 1) {
-    return { status: documents.length ? 'ambiguous_document' : 'document_not_found',
-      candidates: documents.map(({ documentName, documentPath }) => ({ documentName, documentPath })) };
-  }
-  const [{ position, documentPath }] = documents;
-  try {
-    await until(() => page.evaluate(documentNodes, { ...documentQuery, openPosition: position }),
-      'document selection for ' + documentName);
-    const selection = await until(() => page.evaluate(templateListState, { position, pageType: input.pageType }),
-      'enterprise PC templates for ' + documentName);
-    return { documentName, documentPath, ...selection };
-  } finally {
-    await page.evaluate(() => {
-      const list = document.querySelector('#GZTTMP011');
-      const key = Symbol.for('asp-template-list-load');
-      if (list?.[key]) {
-        list[key].observer.disconnect();
-        delete list[key];
-      }
-    });
-  }
 }
 
 function templateRows(input) {
@@ -142,7 +35,7 @@ function templateRows(input) {
 }
 
 async function locateDesigner(task, page, input) {
-  const document = await openList(page, input);
+  const document = await openTemplateList(task, page, input);
   if (document.status) return document;
   const candidates = await page.evaluate(templateRows, input);
   if (candidates.length !== 1) {

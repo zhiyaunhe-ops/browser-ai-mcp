@@ -6,6 +6,7 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const { z } = require('zod');
 const { createService } = require('./service');
 const { updateTemplateField } = require('./asp-template');
+const { workbenchScript, billQueryScript } = require('./asp-scripts');
 const packageInfo = require('../package.json');
 
 const text = z.string().min(1);
@@ -14,10 +15,16 @@ const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
 const output = { data: z.unknown() };
 const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
+const workbenchRound = { ...idempotent, pageLabel: text.optional() };
+
+function readWorkbench(service, businessTool, method, { runId, requestId, pageLabel, ...input }, script = workbenchScript) {
+  const code = 'const workflow = await import(' + JSON.stringify(script) + '); return await workflow.' + method + '(task, page, input);';
+  return service.browserRun({ runId, requestId, pageLabel, businessTool, args: input, purpose: 'observe', timeoutMs: 120000, code });
+}
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: 'ASP UAT 的 PC 单据 UI 模板字段（表头或明细列）使用 asp_ui_template_update_field。按单据名、模板和字段定位，changes={} 读取可用属性。For other browser workflows recall a procedure with run_begin, use browser_run for official ego code, poll run_get, then independently observe business results before run_finish. Browser code receives task, page and input. Use ego-browser documented methods; run_finish owns Space cleanup. Never resend an unresolved write with a new requestId.'
+    instructions: '每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
   const register = (name, description, inputSchema, method) => server.registerTool(name, {
     description, inputSchema, outputSchema: output
@@ -34,6 +41,18 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
+  register('asp_workbench_open_node', '在当前 ASP UAT 任务中按精确服务名打开工作台节点。从目录取得编码后请求服务详情并调用工作台原生导航，失败后走工作台搜索及点选。结果通过 run_get 读取，可在同一任务继续操作。', {
+    ...workbenchRound, nodeName: text.describe('工作台中的精确服务名称，例如 UI模板。'),
+    nodeCode: text.optional().describe('同名目录节点可用候选中的服务编码区分。')
+  }, args => readWorkbench(service, 'asp_workbench_open_node', 'openNode', args));
+  register('asp_workbench_query_templates', '在当前 ASP UAT 任务中按单据、PC 页面类型查询企业级 UI 模板，可按模板 ID、模板名或交易类型筛选。优先用已核实的只读请求取数，失败后走模板列表。通过 run_get 读取结果及使用的路径。', {
+    ...workbenchRound, documentName: text.optional(), documentPath: z.array(text).nonempty().optional(),
+    pageType: text.optional(), templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
+    limit: z.number().int().min(1).max(50).optional().describe('最多返回多少条模板定位信息，默认 10 条。')
+  }, args => readWorkbench(service, 'asp_workbench_query_templates', 'queryTemplates', args));
+  register('asp_workbench_query_general_applications', '在 ASP UAT 通用申请单列表按单号精确查找。优先复用当前页面已核实的列表请求。首次需要识别查询方案或读取失败时使用工作台查询控件，核对结果中的实际单号。通过 run_get 查看使用路径及结果完整性。', {
+    ...workbenchRound, billCode: text.describe('通用申请单的完整单据编号。')
+  }, args => readWorkbench(service, 'asp_workbench_query_general_applications', 'queryGeneralApplications', args, billQueryScript));
   register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。给出单据、模板名或 ID、字段名或编码；同名项返回候选。默认使用通用报销单表头。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
     requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     documentName: text.optional().describe('工作台 UI 模板树中的单据名称。默认通用报销单。'),
@@ -53,7 +72,7 @@ function createMcpServer(service = createService()) {
   register('run_begin', 'Create a durable workflow task and recall applicable procedures. Does not navigate.', {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional()
   }, args => service.begin(args));
-  register('browser_run', 'Execute ego code with task, page and input. Return JSON and poll run_get. Check pageMemos on the settled execution for reminders matching the observed route and dialog before the next action. On a missing Yonyou node, try observed row, hover, More and edit-mode entrances from ys.entries() and modeActions. Re-read after each attempt. Use ys.transferState/transferRight for two-pane pickers. Includes memo, scoped readers and observationTrace by default. DOM globals belong in page.evaluate(). Business completion requires a later independent observe round and run_finish.', {
+  register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
     args: z.unknown().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     pageLabel: text.optional(), resumeAfterUserAction: z.boolean().optional(), memo: z.boolean().optional(),
@@ -69,16 +88,16 @@ function createMcpServer(service = createService()) {
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),
     note: text, keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
-  register('memory_search', 'Recall compact workflow experience for the observed URL and goal.', {
+  register('memory_search', 'Recall procedures for the observed URL and goal. Use sourceRunId with evidence_query to inspect requests recorded when a procedure was saved.', {
     url: z.string().url(), goal: z.string(), limit: z.number().int().min(1).max(10).optional()
   }, args => service.searchMemory(args));
   register('memory_get', 'Read the complete procedure, revision and provenance for one memory.', {
     memoryId: text
   }, args => service.getMemory(args));
-  register('evidence_query', 'Read paginated execution/observation evidence or project explicit network/DOM records. Always reports capture gaps.', {
+  register('evidence_query', 'Read recorded requests and capture gaps by run or execution. Use view=api for observed methods, paths, query keys, request shapes and statuses. Follow nextCursor while hasMore. An observed endpoint still needs business verification before reuse.', {
     runId: text, view: z.enum(['records', 'trace', 'api']).default('records'), ...pagination, executionId: text.optional()
   }, args => service.queryEvidence(args));
-  register('recipe_draft', 'Build an unverified workflow recipe from task evidence and optional caller-authored procedure. No internal model call.', {
+  register('recipe_draft', 'Draft a reusable workflow with automatic request evidence and links to originating executions. Document the verified request inputs, observed click fallback and how to read back the business result in proposedRecipe.', {
     ...idempotent, name: text, proposedRecipe: z.record(z.unknown()).optional()
   }, args => service.draftRecipe(args));
   return server;

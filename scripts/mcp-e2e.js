@@ -55,7 +55,9 @@ async function main() {
   try {
     await client.connect(transport);
     const tools = await client.listTools();
-    assert.equal(tools.tools.length, 8);
+    const toolNames = new Set(tools.tools.map(tool => tool.name));
+    for (const name of ['run_begin', 'browser_run', 'run_get', 'evidence_query', 'recipe_draft',
+      'run_finish', 'memory_search', 'memory_get']) assert.ok(toolNames.has(name), `missing tool ${name}`);
     run = await call(client, 'run_begin', {
       requestId: 'e2e-begin-1', goal: 'Create customer C-1001 and verify it is durable', url: fixture.url,
       criteria: [{ id: 'customer-created', path: 'customer.code', equals: 'C-1001' }],
@@ -400,7 +402,16 @@ return { customer: customer.customer };`,
     const evidence = await call(client, 'evidence_query', { runId: run.runId, view: 'records', limit: 100 });
     assert.ok(evidence.records.some(record => record.kind === 'observation' && record.payload.observationId === verificationExecution.observationId));
     assert.ok(evidence.gaps.some(gap => gap.kind === 'human-actions-not-captured'));
-    assert.ok(evidence.gaps.some(gap => gap.kind === 'network-not-captured'));
+    const verificationNetwork = await call(client, 'evidence_query', {
+      runId: run.runId, executionId: verificationExecution.executionId, view: 'records', limit: 100,
+    });
+    const getRequest = verificationNetwork.records.find(record => record.kind === 'network' &&
+      record.payload.netType === 'request' && record.payload.method === 'GET' &&
+      record.payload.url.endsWith('/api/customers/:value'));
+    assert.ok(getRequest, 'the verification GET is captured in its execution');
+    assert.ok(verificationNetwork.records.some(record => record.kind === 'network' &&
+      record.payload.netType === 'response' && record.payload.requestId === getRequest.payload.requestId &&
+      record.payload.status === 200), 'the GET response status is captured');
 
     const draft = await call(client, 'recipe_draft', {
       runId: run.runId, requestId: 'e2e-draft-1', name: 'Create customer',

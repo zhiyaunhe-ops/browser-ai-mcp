@@ -35,9 +35,34 @@ npm ci
 |---|---|
 | 开始任务，保存目标与验收字段 | `run_begin` |
 | 执行操作或独立读取，查询异步结果 | `browser_run`、`run_get` |
+| 在当前工作台任务中打开节点、按条件查询企业级 PC 模板 | `asp_workbench_open_node`、`asp_workbench_query_templates` |
+| 在通用申请单列表按完整单号查询 | `asp_workbench_query_general_applications` |
 | 用后续观察核对结果并结束任务 | `run_finish` |
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
+
+### 记录请求与复用
+
+每个浏览器执行轮次自动收集所操作页面的 XHR 和 Fetch 请求。用 `run_get` 查看本轮的 `networkCapture`。用 `evidence_query` 传入同一个 `runId`、`executionId` 和 `view: "api"` 可看方法、路径、查询参数名、请求体结构及响应状态。草稿的 `requestEvidence` 带回请求样本和证据 ID。样本超过 30 条时，用原任务的 `evidence_query` 翻页读取其余记录。下次任务命中这条流程记忆或页面提醒时，可以用返回的 `sourceRunId` 查回当时的请求。
+
+工作流优先复用业务含义和参数已核实的请求，并保留可定位到同一目标的页面操作。只读请求失败可切换页面路径。写入超时或响应丢失时，先重新打开目标并核对业务值，避免再按一次保存。抓到 HTTP 200 后仍需核对返回数据或持久化后的业务字段。
+
+同一轮脚本主动调用 `page.events()` 仍能读取原始事件。轮次结束时 MCP 读取剩余缓冲，跨轮查询请使用 `evidence_query`。采集范围限本轮使用的页面，响应可能在轮次结束后才到达；缺失的响应、请求体或超限记录会体现在采集结果里。
+
+例如要在 ASP UAT 查询 Training / Meeting Reimbursement，先用 `run_begin` 在已登录的工作台创建任务，再用下面的参数调用 `asp_workbench_query_templates`。
+
+```json
+{
+  "runId": "<run_begin 返回的 runId>",
+  "requestId": "find-training-template",
+  "documentName": "通用报销单",
+  "templateName": "Training / Meeting Reimbursement"
+}
+```
+
+要先打开某个服务，可在同一任务调用 `asp_workbench_open_node` 并传入工作台上显示的精确 `nodeName`。用返回的 `executionId` 查询 `run_get`，后续操作沿用同一个任务。
+
+按完整单号查通用申请单时，给 `asp_workbench_query_general_applications` 传入 `runId`、`requestId` 和 `billCode`。它按返回行的实际单号核对匹配，结果会说明查询路径和完整性。
 
 ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 All Seasons Property 工作台，读取或修改 PC 单据设计器的表头字段和明细列。通过工作台查找企业账号级模板时，`documentName` 指定业务树中的单据，模板和字段均可按名称或标识定位，同名模板可用 `transactionType` 区分。省略单据和字段位置时沿用通用报销单表头。重试同一操作时沿用原 `requestId`。
 

@@ -54,7 +54,7 @@ class Memory {
 
   pageMemos(url, dialogTitle) {
     return this.pageRules(url.hostname).filter(entry => routeMatches(entry, url, dialogTitle))
-      .map(({ id, name, summary, revision = 0, verification }) => ({ id, name, summary, revision, verification }));
+      .map(({ id, name, summary, revision = 0, verification, sourceRunId }) => ({ id, name, summary, revision, verification, sourceRunId }));
   }
 
   search({ url: value, goal = '', limit = 5 } = {}) {
@@ -70,7 +70,7 @@ class Memory {
     }).filter(item => item.entry.scope === 'domain' || item.route || query.size && item.overlap)
       .sort((a, b) => b.score - a.score || String(b.entry.updatedAt || '').localeCompare(String(a.entry.updatedAt || '')) || a.entry.id.localeCompare(b.entry.id));
     const selected = [...candidates.filter(item => item.entry.scope === 'domain').slice(0, limit), ...candidates.filter(item => item.entry.scope === 'page').slice(0, limit)];
-    const compact = item => ({ ...Object.fromEntries(['id', 'key', 'name', 'scope', 'summary', 'verification', 'verificationScope', 'verifiedAt', 'updatedAt', 'match', 'evidenceAvailability']
+    const compact = item => ({ ...Object.fromEntries(['id', 'key', 'name', 'scope', 'summary', 'verification', 'verificationScope', 'verifiedAt', 'updatedAt', 'match', 'sourceRunId', 'evidenceAvailability']
       .filter(key => item.entry[key] !== undefined).map(key => [key, item.entry[key]])), revision: item.entry.revision ?? 0,
       applicability: item.route ? 'current-route' : 'goal-match-requires-navigation' });
     return clone({ domain: url.hostname, domainRules: selected.filter(item => item.entry.scope === 'domain').map(compact),

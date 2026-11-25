@@ -7,6 +7,8 @@ description: Run browser tasks through MCP and ego lite with scoped Yonyou reade
 
 Start with `run_begin` and a goal, URL and observable business criteria. The first `browser_run` opens the task Space. Run scripts receive `task`, `page` and JSON `input`. Read `ego-browser skill` for the installed Page and TaskSpace API.
 
+For ASP UAT workbench service navigation use `asp_workbench_open_node`. For enterprise PC template lookups use `asp_workbench_query_templates`. Both operate in the current run. Inspect the settled execution's `networkCapture` and use `evidence_query` with the execution ID and `view: "api"` for observed request details and capture gaps. In a reusable procedure, record the verified request inputs, the page controls to use if a read fails, and the observable result. After a write with an uncertain outcome, read back the target before trying either path again.
+
 ## Find a business node
 
 1. On a Yonyou page, inspect `ys.context()` or `ys.find(name)`. Use an observed frame, control ID or scope to narrow the read.

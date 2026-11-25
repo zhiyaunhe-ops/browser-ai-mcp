@@ -47,20 +47,26 @@ class EgoAdapter {
     // 每轮注入的 memo prelude：在 page 可见处安装补丁（坐标点击自动补 label、计数、ys 助手）。
     // 用户代码放在其后，行号会整体后移，报错位置按诊断里的 stack 对齐即可。
     const memoPath = path.join(__dirname, '..', 'scripts', 'ego-memo.mjs');
+    const networkPath = path.join(__dirname, '..', 'scripts', 'ego-network.mjs');
     const memoRevision = createHash('sha256');
-    for (const file of [memoPath, path.join(__dirname, 'memo.js'),
+    for (const file of [memoPath, networkPath, path.join(__dirname, 'memo.js'),
       path.join(__dirname, '..', 'scripts', 'ys-locate.mjs'),
       path.join(__dirname, '..', 'scripts', 'ys-page.mjs'),
       path.join(__dirname, '..', 'scripts', 'ys-transfer.mjs'), path.join(__dirname, 'program-contract.js')]) {
       memoRevision.update(fs.readFileSync(file));
     }
     // Ego may retain ESM imports across rounds. A changed helper needs a new URL.
-    const memoUrl = `${pathToFileURL(memoPath).href}?revision=${memoRevision.digest('hex').slice(0, 16)}`;
-    const prelude = options.memo === false || process.env.EGO_MEMO === '0' ? '' : `
+    const revision = memoRevision.digest('hex').slice(0, 16);
+    const memoUrl = `${pathToFileURL(memoPath).href}?revision=${revision}`;
+    const networkUrl = `${pathToFileURL(networkPath).href}?revision=${revision}`;
+    const memoEnabled = options.memo !== false && process.env.EGO_MEMO !== '0';
+    const prelude = `
+const { createNetworkCapture } = await import(${JSON.stringify(networkUrl)});
+networkCapture = createNetworkCapture(config.executionId);
 memoModule = await import(${JSON.stringify(memoUrl)});
 memoPage = page;
-await memoModule.install(page, { task, pageLabel: config.pageLabel });
-console.log(memoModule.banner());`;
+await memoModule.install(page, { task, pageLabel: config.pageLabel, network: networkCapture, memo: ${memoEnabled} });
+if (${memoEnabled}) console.log(memoModule.banner());`;
     const source = `
 const fs = await import('node:fs/promises');
 const config = ${JSON.stringify(configuration)};
@@ -73,6 +79,7 @@ let task;
 let envelope;
 let memoModule;
 let memoPage;
+let networkCapture;
 let finishDispatched = false;
 try {
   await save('started.json', { executionId: config.executionId, pid: process.pid, startedAt: Date.now() });
@@ -90,7 +97,7 @@ try {
     const input = config.args;
 ${prelude}
     // Bind helpers to this execution instead of the daemon's mutable global.
-    const ys = memoModule ? page.ys : undefined;
+    const ys = ${memoEnabled} ? page.ys : undefined;
     result = await (async () => {
 ${options.mode === 'run' ? options.code : ''}
     })();
@@ -125,12 +132,17 @@ ${options.mode === 'run' ? options.code : ''}
 // Capture settled reads even when user code failed. No memo means unavailable,
 // rather than a fabricated zero-reader round. Never replace the original error.
 try {
-  if (memoModule && memoPage) {
+  if (${memoEnabled} && memoModule && memoPage) {
     envelope.memo = memoModule.report(memoPage);
     envelope.observationTrace = memoModule.observationTrace(memoPage);
   }
 } catch { /* Telemetry must not change execution outcome. */ }
-if (memoModule && memoPage && config.pageMemoRead && envelope.state === 'succeeded') {
+if (networkCapture) {
+  try { envelope.networkCapture = await networkCapture.finish(); }
+  catch { envelope.networkCapture = { version: 1, source: 'ego-page', status: 'unavailable',
+    capturedRequests: 0, gaps: [{ kind: 'network-collection-failed' }], records: [] }; }
+}
+if (${memoEnabled} && memoModule && memoPage && config.pageMemoRead && envelope.state === 'succeeded') {
   try { envelope.pageContext = await memoModule.readMemoContext(memoPage, config.pageMemoRead); }
   catch { /* A closed or navigating page can no longer supply a reminder. */ }
 }

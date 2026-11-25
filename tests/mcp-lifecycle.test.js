@@ -78,7 +78,7 @@ test('MCP exposes nine tools and completes a verified memory workflow with idemp
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
+    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
   ]);
 
   const beginArgs = {
@@ -468,4 +468,32 @@ test('run_begin recalls with at most 500 goal characters while preserving the fu
   assert.equal(searches[0].goal, goal.slice(0, 500));
   assert.equal(run.goal, goal);
   assert.equal(service.run(run.runId).goal, goal);
+});
+
+test('automatic request evidence is stored and referenced by a recipe draft', async t => {
+  const request = { src: 'ego-page', netType: 'request', requestId: 'execution:1', tabId: 'main',
+    method: 'POST', url: 'https://example.test/api/items', queryKeys: ['filter'],
+    requestShape: { format: 'json', type: 'object', properties: { name: { type: 'string' } } }, t: 1 };
+  const response = { src: 'ego-page', netType: 'response', requestId: 'execution:1', tabId: 'main',
+    method: 'POST', url: request.url, queryKeys: request.queryKeys, status: 200, t: 2 };
+  const { adapter } = makeAdapter({ async run() { return { state: 'succeeded', spaceId: 71, executionStopped: true,
+    result: { ok: true }, networkCapture: { version: 1, source: 'ego-page', status: 'captured', capturedRequests: 1,
+      gaps: [], records: [request, response] } }; } });
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const run = (await client.callTool({ name: 'run_begin', arguments: { requestId: 'begin-network', goal: 'Inspect',
+    url: 'https://example.test/', criteria: [] } })).structuredContent.data;
+  const invocation = (await client.callTool({ name: 'browser_run', arguments: { runId: run.runId,
+    requestId: 'observe-network', purpose: 'observe', code: 'return { ok: true };' } })).structuredContent.data;
+  await waitForExecution(client, run.runId, invocation.executionId);
+  const evidence = (await client.callTool({ name: 'evidence_query', arguments: { runId: run.runId, view: 'records' } })).structuredContent.data;
+  const records = evidence.records.filter(record => record.kind === 'network');
+  assert.equal(records.length, 2);
+  const draft = (await client.callTool({ name: 'recipe_draft', arguments: { runId: run.runId,
+    requestId: 'draft-network', name: 'Inspect items' } })).structuredContent.data;
+  assert.equal(draft.requestEvidence.capturedRequests, 1);
+  assert.equal(draft.requestEvidence.hasMore, false);
+  assert.deepEqual(draft.requestEvidence.requests[0], { evidenceId: records[0].recordId,
+    responseEvidenceId: records[1].recordId, executionId: invocation.executionId, method: 'POST', url: request.url,
+    queryKeys: ['filter'], requestShape: request.requestShape, status: 200 });
 });

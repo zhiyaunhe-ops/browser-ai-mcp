@@ -143,7 +143,10 @@ class BrowserService {
   async browserRun(args) {
     await this.refresh(args.runId);
     const execution = this.store.transaction(() => {
-      const request = this.request('browser_run', args.runId, args);
+      // A named workbench read keeps its request identity across implementation revisions.
+      const identity = args.businessTool ? { requestId: args.requestId, businessTool: args.businessTool,
+        pageLabel: args.pageLabel, args: args.args } : args;
+      const request = this.request('browser_run', args.runId, identity);
       if (request.previous) return this.store.get('execution', request.previous.executionId);
       const run = this.run(args.runId);
       if (run.feedback && run.feedback.outcome !== 'unknown' || !['active', 'needs_verification', 'awaiting_user'].includes(run.state)) throw problem('RUN_CLOSED', 'This run is already finishing or closed');
@@ -174,6 +177,7 @@ class BrowserService {
       const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url).hostname);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
         sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
+        ...(args.businessTool ? { businessTool: args.businessTool } : {}),
         timeoutMs: args.timeoutMs || 30000, spaceId: run.spaceId, name: run.name,
         pageLabel: args.pageLabel || run.pageLabel, resumeAfterUserAction: args.resumeAfterUserAction === true,
         memo: args.memo !== false,
@@ -218,16 +222,23 @@ class BrowserService {
       const execution = this.store.get('execution', executionId);
       if (!execution || ['succeeded', 'failed'].includes(execution.state)) return;
       if (!result || !['succeeded', 'failed', 'outcome_unknown'].includes(result.state)) throw problem('EGO_RESULT_INVALID', 'Adapter returned an invalid execution state');
+      const { records: networkRecords, ...capture } = result.networkCapture || {};
+      const networkCapture = result.networkCapture ? capture : execution.networkCapture ?? null;
       if (execution.state === 'outcome_unknown' && result.state === execution.state &&
         execution.executionStopped === (result.executionStopped === true) &&
         isDeepStrictEqual(execution.error, result.error || null) &&
         (result.spaceId == null || result.spaceId === execution.spaceId) &&
-        isDeepStrictEqual(execution.observationTrace ?? null, result.observationTrace ?? null)) return;
+        isDeepStrictEqual(execution.observationTrace ?? null, result.observationTrace ?? null) &&
+        isDeepStrictEqual(execution.networkCapture ?? null, networkCapture)) return;
       const run = this.run(execution.runId);
+      if (!execution.networkCapture && Array.isArray(networkRecords)) for (const payload of networkRecords) {
+        this.record(run.runId, executionId, 'network', payload);
+      }
       Object.assign(execution, { state: result.state, result: result.result ?? null,
         error: result.error || null, executionStopped: result.executionStopped === true,
         memoStats: typeof result.memo === 'string' ? result.memo : null,
         observationTrace: result.observationTrace ?? null,
+        networkCapture,
         recovery: recoveryFor(result.error),
         finishedAt: this.now() });
       if (result.spaceId != null) { execution.spaceId = result.spaceId; run.spaceId = result.spaceId; }
@@ -282,7 +293,7 @@ class BrowserService {
     const records = this.store.query({ runId: run.runId, after: args.cursor || 0, limit: args.limit || 30 });
     const { finishArguments, ...publicRun } = run;
     return { ...publicRun, executionCount, executions: executions.map(e => this.executionView(e)),
-      ...records, records: records.records.map(r => ({ ...r, payload: small(r.payload) })), gaps: this.gaps(run.runId) };
+      ...records, records: records.records.map(r => ({ ...r, payload: small(r.payload) })), gaps: this.gaps(run.runId, args.executionId) };
   }
 
   async finish(args) {
@@ -406,19 +417,37 @@ class BrowserService {
 
   searchMemory(args) { return this.memory.search(args); }
   getMemory(args) { return this.memory.get(args.memoryId); }
-  gaps(runId) {
-    const network = this.store.query({ runId, kind: 'network', limit: 1 }).records;
+  gaps(runId, executionId) {
+    const executions = this.executions(runId).filter(execution => !executionId || execution.executionId === executionId);
+    const attempts = executions.filter(execution => execution.networkCapture);
+    const gaps = new Map();
+    for (const execution of executions) {
+      const issues = execution.networkCapture?.gaps ||
+        (['succeeded', 'failed', 'outcome_unknown'].includes(execution.state) ? [{ kind: 'network-round-capture-missing' }] : []);
+      for (const kind of new Set(issues.map(issue => issue.kind))) {
+        const entry = gaps.get(kind) || { kind, affectedExecutions: 0 };
+        entry.affectedExecutions++;
+        gaps.set(kind, entry);
+      }
+    }
+    const network = attempts.length ? [] : this.store.query({ runId, executionId, kind: 'network', limit: 1 }).records;
     return [{ kind: 'per-action-not-captured', message: 'Executions record script rounds, not every inner click' },
       { kind: 'human-actions-not-captured' },
-      ...(!network.length ? [{ kind: 'network-not-captured' }] : [{ kind: 'network-partial', message: 'Only explicitly returned network evidence was captured' }])];
+      ...(attempts.length ? [{ kind: 'network-page-session-scope',
+        message: 'Capture covers the used Page sessions during each round. Worker and separate iframe sessions, other tabs, and requests or responses outside the capture window may be absent. Response bodies are outside the capture scope.' }]
+        : network.length ? [{ kind: 'network-partial', message: 'Only explicitly returned network evidence was captured' }]
+          : [{ kind: 'network-not-captured' }]),
+      ...[...gaps.values()].map(gap => gap.kind === 'network-events-not-observed'
+        ? { ...gap, message: 'No CDP network events were observed in at least one used Page session. The page may have made no requests.' }
+        : gap)];
   }
   queryEvidence(args) {
     this.run(args.runId);
     if (args.view && !['records', 'trace', 'api'].includes(args.view)) throw problem('INVALID_ARGUMENT', 'view must be records, trace or api');
     const page = this.store.query({ runId: args.runId, after: args.cursor || 0, limit: args.limit || 30, executionId: args.executionId });
     const records = page.records.map(r => ({ ...r, payload: small(r.payload) }));
-    if (!args.view || args.view === 'records') return { ...page, records, gaps: this.gaps(args.runId) };
-    // Correlation and endpoint inference operate only on explicit observations.
+    const gaps = this.gaps(args.runId, args.executionId);
+    if (!args.view || args.view === 'records') return { ...page, records, gaps };
     const { buildTrace, discoverAPI } = require('./trace-engine');
     const rows = page.records.filter(r => ['network', 'dom'].includes(r.kind) || r.kind === 'execution' && r.payload.phase === 'intent').map(r => ({ ...r.payload,
       eventId: r.recordId, cursor: r.cursor, kind: r.kind === 'network' ? 'net' : 'user',
@@ -426,7 +455,34 @@ class BrowserService {
       ...(r.kind === 'execution' ? { type: 'action-start', action: 'script-round', actor: 'agent' } : {}),
       sessionId: r.runId, commandId: r.executionId, seq: r.cursor, t: r.payload.t ?? r.observedAt }));
     return { ...page, records, projection: args.view === 'api' ? discoverAPI(rows) : buildTrace(rows),
-      gaps: [...this.gaps(args.runId), ...((args.cursor || page.hasMore) ? [{ kind: 'projection-window', message: 'This projection covers one evidence page; related records may be on another page' }] : [])] };
+      gaps: [...gaps, ...((args.cursor || page.hasMore) ? [{ kind: 'projection-window', message: 'This projection covers one evidence page; related records may be on another page' }] : [])] };
+  }
+  recipeRequestEvidence(runId) {
+    const requests = [];
+    const samples = new Map();
+    let capturedRequests = 0;
+    let cursor = 0;
+    let page;
+    do {
+      page = this.store.query({ runId, after: cursor, kind: 'network', limit: 500 });
+      cursor = page.nextCursor;
+      for (const { recordId, executionId, payload } of page.records) {
+        if (payload.src !== 'ego-page') continue;
+        const key = JSON.stringify([executionId, payload.tabId, payload.requestId]);
+        if (payload.netType === 'request') {
+          capturedRequests++;
+          if (requests.length >= 30) continue;
+          const { method, url, queryKeys, requestShape } = payload;
+          const sample = { evidenceId: recordId, executionId, method, url, queryKeys, requestShape };
+          requests.push(sample);
+          samples.set(key, sample);
+        } else if (payload.netType === 'response' && samples.has(key)) {
+          Object.assign(samples.get(key), { status: payload.status, responseEvidenceId: recordId });
+        }
+      }
+    } while (page.hasMore);
+    return { capturedRequests, requests, hasMore: capturedRequests > requests.length,
+      gaps: this.gaps(runId).filter(gap => gap.kind !== 'per-action-not-captured' && gap.kind !== 'human-actions-not-captured') };
   }
   draftRecipe(args) {
     return this.store.transaction(() => {
@@ -437,10 +493,12 @@ class BrowserService {
       const executions = this.executions(run.runId);
       const draftId = this.id();
       const recipe = args.proposedRecipe || { goal: run.goal, parameters: {}, preconditions: [],
-        steps: executions.filter(e => e.purpose === 'execute').map(e => ({ intent: 'Review recorded script intent', executionId: e.executionId })),
+        steps: executions.filter(e => e.purpose === 'execute' || e.businessTool).map(e => e.businessTool
+          ? { tool: e.businessTool, parameterNames: Object.keys(e.args), executionId: e.executionId }
+          : { intent: 'Review recorded script intent', executionId: e.executionId }),
         verify: run.criteria, traps: [] };
       const draft = { draftId, runId: run.runId, name: args.name, state: 'draft', recipe: json(recipe),
-        evidence: executions.map(e => e.observationId).filter(Boolean),
+        evidence: executions.map(e => e.observationId).filter(Boolean), requestEvidence: this.recipeRequestEvidence(run.runId),
         unresolved: ['Review step intent and parameters; a draft is not verified knowledge'], createdAt: this.now() };
       this.store.put('draft', draftId, draft);
       this.saveRequest(request, { runId: run.runId, draftId });

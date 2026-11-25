@@ -70,6 +70,7 @@ function buildTrace(events = [], options = {}) {
         network.push(request); netGroups.set(key, request);
       }
       request.method ||= event.method || null; request.url ||= event.url || null;
+      if (event.redirectedFromRequestId) request.redirectedFromRequestId = event.redirectedFromRequestId;
       if (Number.isFinite(event.status)) request.statuses = unique([...request.statuses, event.status]);
       request.phases = unique([...request.phases, event.netType || event.type || event.kind]);
       for (const key of ['truncated', 'captureSkipped', 'captureError', 'error', 'sourceGap']) {
@@ -246,8 +247,11 @@ function discoverAPI(events = [], options = {}) {
       state: 'observed', sources: [], statuses: [], queryKeys: [], requestShapes: [], responseShapes: [], evidence: [], captureGaps: [] });
     const api = groups.get(key);
     api.sources = unique([...api.sources, event.src || event.source || 'unknown']);
-    api.queryKeys = unique([...api.queryKeys, ...url.searchParams.keys()]).sort();
+    api.queryKeys = unique([...api.queryKeys, ...url.searchParams.keys(), ...(event.queryKeys || [])]).sort();
     if (Number.isFinite(event.status)) api.statuses = unique([...api.statuses, event.status]).sort((a, b) => a - b);
+    if (event.requestShape && !api.requestShapes.some(existing => JSON.stringify(existing) === JSON.stringify(event.requestShape))) {
+      api.requestShapes.push(event.requestShape);
+    }
     for (const [fields, output] of [[['reqBody', 'requestBody', 'body'], 'requestShapes'], [['resBody', 'responseBody'], 'responseShapes']]) {
       for (const field of fields) if (event[field] !== undefined && event[field] !== null) {
         const responseBody = field === 'body' && /response|body/.test(event.type || event.netType || '') && !/request/.test(event.type || event.netType || '');

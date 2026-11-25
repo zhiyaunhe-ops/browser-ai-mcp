@@ -48,15 +48,35 @@ async function measured(c, label, method, stage, invoke) {
     throw error;
   } finally { if (event) event.durationMs = Date.now() - start; }
 }
-function instrument(page, c, label) {
+function instrument(page, c, label, selected = true) {
   if (!page) return page;
   registry.pages.set(page, { c, label: label || page.label || 'unknown' });
   const binding = () => registry.pages.get(page);
+  const track = () => {
+    const { c, label } = binding();
+    const read = page.events?.[ORIGINAL] || page.events;
+    if (c.network) c.network.track(page, label, () => read.call(page));
+  };
+  if (c.network) {
+    if (selected) track();
+    wrap(page, 'events', async function (original, args) {
+      track();
+      const events = await original.apply(this, args);
+      try { binding().c.network.accept(binding().label, events); }
+      catch { /* Preserve the caller's raw event drain. */ }
+      return events;
+    });
+  }
   const stages = { snapshot: 'semantic', screenshot: 'visual', evaluate: 'evaluation',
     click: 'action', dblclick: 'action', hover: 'action', dragAndDrop: 'action', fill: 'action',
     selectOption: 'action', focus: 'action', press: 'action', setInputFiles: 'action', goto: 'action', reload: 'action' };
+  for (const key of ['url', 'title', 'cdp', 'fetch', 'waitForSelector', 'waitForLoadState']) {
+    if (c.network) wrap(page, key, function (original, args) { track(); return original.apply(this, args); });
+  }
   for (const [key, stage] of Object.entries(stages)) wrap(page, key, async function (original, args) {
     const { c, label } = binding();
+    track();
+    if (c.memo === false) return original.apply(this, args);
     c.lastPage = page;
     return measured(c, label, `page.${key}`, stage, async () => {
       assertCall(`page.${key}`, args);
@@ -70,6 +90,8 @@ function instrument(page, c, label) {
   });
   for (const key of ['click', 'move', 'wheel', 'down', 'up']) wrap(page.mouse, key, async function (original, args) {
     const { c, label } = binding();
+    track();
+    if (c.memo === false) return original.apply(this, args);
     c.lastPage = page;
     return measured(c, label, `page.mouse.${key}`, 'action', async () => {
       assertCall(`page.mouse.${key}`, args);
@@ -83,6 +105,9 @@ function instrument(page, c, label) {
       return original.apply(this, args);
     });
   });
+  for (const key of ['press', 'type', 'down', 'up', 'insertText']) {
+    if (c.network) wrap(page.keyboard, key, function (original, args) { track(); return original.apply(this, args); });
+  }
   return page;
 }
 function instrumentTask(task, c) {
@@ -96,7 +121,7 @@ function instrumentTask(task, c) {
     return page;
   });
   wrap(task, 'pages', async function (original, args) {
-    return (await original.apply(this, args)).map(page => instrument(page, registry.tasks.get(task)));
+    return (await original.apply(this, args)).map(page => instrument(page, registry.tasks.get(task), undefined, false));
   });
 }
 async function describeAt(page, x, y) {
@@ -110,8 +135,11 @@ async function describeAt(page, x, y) {
 export async function install(page, opts = {}) {
   if (!page) return { skipped: 'no page' };
   const c = collector(); latest = c;
-  page.__egoMemoInstalled = `${VERSION}:${new URL(import.meta.url).search}`;
+  c.network = opts.network;
+  c.memo = opts.memo;
   instrumentTask(opts.task, c); instrument(page, c, opts.pageLabel);
+  if (c.memo === false) return { installed: false };
+  page.__egoMemoInstalled = `${VERSION}:${new URL(import.meta.url).search}`;
   c.stats.installed++;
   page.ys = {
     fieldid: key => `button[fieldid$="|${String(key).replace(/^\||\|$/g, '')}"]`,

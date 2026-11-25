@@ -257,9 +257,12 @@ test('workbench document selection handles default, missing, duplicate and path-
       return item;
     }
     const page = {
+      async url() { return 'https://global.yonyoucloud.com/'; },
       async goto() {},
       async fill(selector, value) { if (selector.startsWith('#GZTTMP011')) { filtered = true; filled = value; } },
       async evaluate(fn, arg) {
+        if (fn.name === 'nodeCodes') return ['GZTTMP011'];
+        if (fn.name === 'openNativeNode') return { request: { method: 'GET', httpStatus: 200 } };
         if (fn.name === 'documentNodes') {
           if (arg.openPosition !== undefined) return true;
           const old = global.document;

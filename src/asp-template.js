@@ -1,12 +1,6 @@
 'use strict';
 
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-const { readFileSync } = require('node:fs');
-const { createHash } = require('node:crypto');
-const scriptFile = path.join(__dirname, '../scripts/asp-template.mjs');
-const revision = createHash('sha256').update(readFileSync(scriptFile)).digest('hex').slice(0, 16);
-const script = pathToFileURL(scriptFile).href + '?revision=' + revision;
+const { templateScript: script } = require('./asp-scripts');
 const workbench = 'https://global.yonyoucloud.com/';
 
 async function updateTemplateField(service, input) {
