@@ -184,6 +184,7 @@ class BrowserService {
         spaceId: null, pageLabel: 'p1', name: `browser-ai:${runId}`,
         ...edition(domainTag),
         ...(reviewMemory ? { reviewMemory } : {}),
+        ...(args.sessionSource ? { sessionSource: args.sessionSource } : {}),
         recalledMemory, cleanup: { state: 'not_requested' } };
       this.store.put('run', runId, run);
       this.saveRequest(request, { runId });

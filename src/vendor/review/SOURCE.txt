@@ -1,0 +1,8 @@
+Local Review and Eval runtime from zhiyaunhe-ops/yonclaw-toolkit
+Source: https://github.com/zhiyaunhe-ops/yonclaw-toolkit/tree/ad1986e57068165d230329ff94db345de2f9ca8a/runtime
+
+review_domain.py and review_semantics.py are unchanged from that revision.
+review.py uses the browser data directory for local SQLite state and can
+reopen the previous Toolkit installation's review and task databases.
+telegram_review_cards.py retains only the local SQLite history and observation
+functions called by review.py and their dependencies.

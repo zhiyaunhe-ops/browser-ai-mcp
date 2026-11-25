@@ -4,6 +4,7 @@ const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
 const { callReviewToolkit, resolveDomainTag } = require('./review-toolkit');
+const { sessionContext } = require('./session-context');
 const { edition } = require('./service');
 const text = z.string().min(1);
 const editionField = { domain_tag: text.optional() };
@@ -21,13 +22,15 @@ const memory = z.object({
   evidence: text.describe('Describe the evidence source or the planned evidence source. Cite Browser observation and record IDs in evidenceIds.'),
   model: text.optional()
 });
+const sessionSource = z.object({ path: text, sessionId: text, startLine: z.number().int().positive().optional() });
+const sessionRefs = z.array(z.object({ path: text, sessionId: text, line: z.number().int().positive(), commit: text.optional() })).max(30);
 const assessment = {
   reviewerModel: text, verdict, criterionResults: z.array(criterionResult).max(30), evidenceIds: ids, summary,
   memory: memory.optional()
 };
 const memoryOrigin = z.enum(['run_begin', 'eval_submit']);
 const report = z.object({ runId: text, reviewKey: text, reviewId: text, submittedAt: z.number(),
-  ...editionField, ...assessment, memoryOrigin: memoryOrigin.optional() });
+  ...editionField, ...assessment, sessionRefs: sessionRefs.optional(), memoryOrigin: memoryOrigin.optional() });
 const relatedReview = z.object({ attemptId: text, ...editionField, problemId: text.optional(), goal: text.optional(), verdict: verdict.optional() });
 const error = (code, message) => Object.assign(new Error(message), { code });
 
@@ -50,7 +53,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
   }));
   return { schemaVersion: 1, runId, reviewKey: run.feedback.requestId, reviewState,
     ...edition(run.domain_tag), goal: run.goal, url: run.url,
-    criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
+    ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
     lastWriteSequence: run.lastWriteSequence ?? 0, verification: run.feedback.verification,
     readbacks: service.criterionReadbacks(run), gaps: service.gaps(runId), relatedReviews,
     ...(run.reviewMemory ? { reviewMemory: run.reviewMemory } : {}),
@@ -59,7 +62,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
 
 function submit(service, input) {
   return service.store.transaction(() => {
-    const { runId, reviewKey, domain_tag, requestId: _requestId, ...assessment } = input;
+    const { runId, reviewKey, domain_tag, sessionRefs, requestId: _requestId, ...assessment } = input;
     const request = service.request('eval_submit', runId, input);
     if (request.previous) return service.store.get('evaluation', request.previous.reviewId);
     const run = service.run(runId);
@@ -99,7 +102,7 @@ function submit(service, input) {
       throw error('EVAL_MEMORY_CONFLICT', 'Keep the reviewMemory preregistered in run_begin.');
     }
     const reviewId = service.id();
-    const review = { runId, reviewKey, reviewId, submittedAt: service.now(), ...evaluated,
+    const review = { runId, reviewKey, reviewId, submittedAt: service.now(), ...evaluated, ...(sessionRefs ? { sessionRefs } : {}),
       ...edition(run.domain_tag),
       ...(evaluated.memory ? { memoryOrigin: run.reviewMemory ? 'run_begin' : 'eval_submit' } : {}) };
     service.store.put('evaluation', reviewId, review);
@@ -126,7 +129,7 @@ function registerEvaluationTools(register, service) {
     z.object({ runs: z.array(z.object({ ...runId, ...editionField, goal: text, outcome: text, reviewKey: text })), ...pagination }));
   register('eval_packet', '评估模型读取任务目标、验收条件、执行结果、独立回读和采集缺口。用 evidence_query 补读记录与请求。将 relatedReviews 中的 attemptId 填入 review_history 的 attempt_id 查询往期评估。同一问题的后续尝试沿用 problem_id，翻页和提交沿用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
     args => service.store.transaction(() => packet(service, args)),
-    z.object({ schemaVersion: z.literal(1), ...runId, ...editionField, reviewKey: text, reviewState: state, goal: text, url: text,
+    z.object({ schemaVersion: z.literal(1), ...runId, ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
       criteria: z.array(z.object({ id: text, path: z.string(), equals: z.unknown() })), executionOutcome: text,
       executionNote: z.string(), verification: z.array(z.object({ criterionId: text, observationId: text })),
       readbacks: z.array(z.object({ criterionId: text, found: z.boolean(), observationId: text.optional(),
@@ -136,7 +139,7 @@ function registerEvaluationTools(register, service) {
         purpose: text, state: text, observationId: text.optional(), businessTool: text.optional(),
         result: z.unknown(), error: z.unknown(), networkCapture: z.unknown() })), gaps: z.array(z.record(z.unknown())), ...pagination }));
   register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。证据不足可标记 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
-    ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment
+    ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment, sessionRefs: sessionRefs.optional()
   }, args => submit(service, args), report);
   register('run_summary', '读取运行结果、评估进度及独立模型已提交的结构化总结。', runId, args => {
     const run = service.run(args.runId);
@@ -146,9 +149,21 @@ function registerEvaluationTools(register, service) {
       executionOutcome: run.outcome ?? null, reviewState,
       review: review ? { ...edition(run.domain_tag), ...review } : null };
   }, z.object({ ...runId, ...editionField, goal: text, url: text, executionOutcome: text.nullable(), reviewState: state, review: report.nullable() }));
+  register('eval_session_context', 'Read the original local harness JSONL by absolute path and physical line number. Compare the user request, corrections, tool output and final answer. Continue at nextLine. A truncated or missing record leaves that evidence incomplete.', {
+    path: text, startLine: z.number().int().positive().optional(), limit: z.number().int().min(1).max(50).optional()
+  }, sessionContext);
+  register('review_observe', 'Record a later measurement for a local Browser reviewId. Use the deployed commit for version when known. Supply baseline for directional findings and observed_at with offset on the submission day. Identical measurements are idempotent.', {
+    attempt_id: text, observation: z.object({
+      day: text, version: text.nullable(), eligible: z.number().int().nonnegative().nullable(),
+      affected: z.number().int().nonnegative().nullable(), evidence: text,
+      finding: z.enum(['unknown', 'no_sample', 'observed', 'improved', 'unchanged', 'regressed']),
+      baseline: z.object({ eligible: z.number().int().positive(), affected: z.number().int().nonnegative(), evidence: text }).optional(),
+      observed_at: text.optional(), exposure_evidence: text.optional(), supersedes: text.optional()
+    })
+  }, args => callReviewToolkit('observe', { ...args, source: 'browser' }, ['--browser-db', path.join(service.store.directory, 'browser-ai.sqlite')]));
   register('review_history', '读取 Toolkit 汇总的独立评估、决策和后续观察。按 problem_id、attempt_id 或来源筛选。Browser 的 attempt_id 对应 reviewId。', {
     ...editionField, problem_id: text.optional(), attempt_id: text.optional(), source: z.enum(['browser', 'telegram']).optional()
   }, args => history(service, args));
 }
 
-module.exports = { registerEvaluationTools, reviewMemorySchema: memory };
+module.exports = { registerEvaluationTools, reviewMemorySchema: memory, sessionSource };

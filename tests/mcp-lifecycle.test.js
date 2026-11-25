@@ -84,7 +84,7 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'asp_ui_template_verify_batch', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'run_begin', 'run_finish', 'run_get', 'run_summary',
+    'asp_ui_template_update_field', 'asp_ui_template_verify_batch', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_session_context', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'review_observe', 'run_begin', 'run_finish', 'run_get', 'run_summary',
   ]);
 
   const beginArgs = {
@@ -734,6 +734,63 @@ test('Toolkit central eval actions read and submit a Browser handoff offline', a
   assert.equal(central('run_summary', { runId: run.runId }).review.reviewId, review.reviewId);
   assert.ok(Array.isArray(central('evidence_query', { runId: run.runId, view: 'records' }).records));
   assert.equal(central('eval_pending', {}).runs.some(item => item.runId === run.runId), false);
+});
+
+test('embedded review toolkit supports session context and browser review observations without external checkout', async t => {
+  const configuredToolkit = process.env.BROWSER_AI_REVIEW_TOOLKIT;
+  delete process.env.BROWSER_AI_REVIEW_TOOLKIT;
+  t.after(() => {
+    if (configuredToolkit === undefined) delete process.env.BROWSER_AI_REVIEW_TOOLKIT;
+    else process.env.BROWSER_AI_REVIEW_TOOLKIT = configuredToolkit;
+  });
+  const dataDir = temporaryDirectory();
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const sessionPath = path.join(dataDir, 'session.jsonl');
+  const sessionRows = [
+    { type: 'message', role: 'user', text: 'Inspect fixture' },
+    { type: 'message', role: 'assistant', text: 'Checked the fixture.' },
+  ];
+  fs.writeFileSync(sessionPath, `${sessionRows.map(row => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+
+  const run = await call('run_begin', { requestId: 'embedded-review-start', url: 'https://example.test/', goal: 'Inspect fixture', criteria: [],
+    sessionSource: { path: sessionPath, sessionId: 'fixture-session', startLine: 1 } });
+  await call('run_finish', { runId: run.runId, requestId: 'embedded-review-finish', outcome: 'unknown', note: 'No business readback.' });
+  assert.ok((await call('eval_pending', {})).runs.some(item => item.runId === run.runId));
+  const packet = await call('eval_packet', { runId: run.runId });
+  assert.deepEqual(packet.sessionSource, { path: sessionPath, sessionId: 'fixture-session', startLine: 1 });
+  const review = await call('eval_submit', { runId: run.runId, requestId: 'embedded-review-submit', reviewKey: packet.reviewKey,
+    reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence', criterionResults: [], evidenceIds: [],
+    summary: { result: 'Evidence is insufficient.', lessons: [], limitations: ['No business readback'] },
+    sessionRefs: [{ path: sessionPath, sessionId: 'fixture-session', line: 1 }] });
+  assert.deepEqual(review.sessionRefs, [{ path: sessionPath, sessionId: 'fixture-session', line: 1 }]);
+  assert.equal((await call('run_summary', { runId: run.runId })).review.reviewId, review.reviewId);
+  assert.equal((await call('eval_pending', {})).runs.some(item => item.runId === run.runId), false);
+  const first = await call('eval_session_context', { path: sessionPath, startLine: 1, limit: 1 });
+  assert.equal(first.records.length, 1);
+  assert.deepEqual(first.records[0], { line: 1, record: sessionRows[0] });
+  assert.equal(first.nextLine, 2);
+  const second = await call('eval_session_context', { path: sessionPath, startLine: first.nextLine, limit: 1 });
+  assert.deepEqual(second.records[0], { line: 2, record: sessionRows[1] });
+  assert.equal(second.nextLine, null);
+
+  const hktDate = new Date(review.submittedAt + 8 * 60 * 60 * 1000).toISOString();
+  const observation = { day: hktDate.slice(0, 10), observed_at: `${hktDate.slice(0, -1)}+08:00`,
+    version: 'fixture-v1', eligible: 1, affected: 0, finding: 'observed', evidence: 'session fixture lines 1-2' };
+  const recorded = await call('review_observe', { attempt_id: review.reviewId, observation });
+  const replayed = await call('review_observe', { attempt_id: review.reviewId, observation });
+  assert.deepEqual({ source: recorded.source, recorded: recorded.recorded, replayed: recorded.replayed },
+    { source: 'browser', recorded: 1, replayed: 0 });
+  assert.deepEqual({ source: replayed.source, recorded: replayed.recorded, replayed: replayed.replayed },
+    { source: 'browser', recorded: 0, replayed: 1 });
+  const history = await call('review_history', { attempt_id: review.reviewId, source: 'browser' });
+  assert.ok(JSON.stringify(history).includes('session fixture lines 1-2'));
 });
 
 test('known historical ASP review is classified when an existing database is reopened', async t => {
