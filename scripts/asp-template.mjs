@@ -2,6 +2,7 @@
 // ID to its designer URL; the designer's PT identifier is a different key.
 const workbench = 'https://global.yonyoucloud.com/';
 const tenantTitle = 'All SEASONS PROPERTY CO., LTD';
+const defaultDocument = '通用报销单';
 
 async function until(read, description) {
   const deadline = Date.now() + 45000;
@@ -13,7 +14,71 @@ async function until(read, description) {
   throw new Error('Timed out waiting for ' + description);
 }
 
-async function openList(page) {
+function documentNodes(input) {
+  const list = document.querySelector('#GZTTMP011');
+  const nodes = [...list.querySelectorAll('.wui-tree .tree-node-title[title]')];
+  const empty = list.querySelector('.search-tree-out-container .wui-empty-description');
+  if (empty?.textContent.trim() === '搜索无结果') return input.openPosition === undefined ? [] : false;
+  const query = input.documentName.toLowerCase();
+  const filtered = nodes.some(node => node.querySelector('.high-light')?.textContent.toLowerCase() === query);
+  if (!filtered) return false;
+  const matches = [];
+  for (const node of nodes) {
+    const leaf = node.closest('li');
+    if (!leaf.classList.contains('wui-tree-treenode-leaf') || node.title !== input.documentName) continue;
+    const documentPath = [];
+    for (let li = leaf; li; li = li.parentElement.closest('li')) {
+      documentPath.unshift(li.querySelector(':scope > div .tree-node-title').title);
+    }
+    if (input.documentPath && (input.documentPath.length !== documentPath.length ||
+        input.documentPath.some((name, index) => name !== documentPath[index]))) continue;
+    const link = node.closest('a');
+    if (input.openPosition === link.getAttribute('pos')) {
+      const state = { startedAt: performance.now(), loaded: false };
+      state.observer = new PerformanceObserver(entries => {
+        state.loaded ||= entries.getEntries().some(entry => entry.startTime >= state.startedAt &&
+          new URL(entry.name, location.href).pathname === '/iuap-metadata-ui/template/manage/listTenantTemplates' &&
+          entry.responseStatus === 200);
+      });
+      state.observer.observe({ type: 'resource' });
+      list[Symbol.for('asp-template-list-load')] = state;
+      link.click();
+      return true;
+    }
+    matches.push({ documentName: node.title, documentPath, position: link.getAttribute('pos') });
+  }
+  return input.openPosition === undefined ? matches : false;
+}
+
+function templateListState({ position, pageType }) {
+  const list = document.querySelector('#GZTTMP011');
+  const selected = list.querySelector('.wui-tree-treenode-selected > div > a');
+  if (selected?.getAttribute('pos') !== position) return false;
+  // The selected filters can render before the tenant-template list is refreshed.
+  const state = list[Symbol.for('asp-template-list-load')];
+  if (!state?.loaded) return false;
+  const tag = key => list.querySelector('[fieldid="mdd_templatelist|showSearchCommon|' + key + '"] .wui-tag-text')?.textContent.trim();
+  const selector = '[fieldid^="GZTTMP011|viewtype|"]';
+  const view = list.querySelector(selector + '.wui-tag-selected')?.textContent.trim();
+  if (tag('terminaltype') !== '终端类型:PC' || tag('org') !== '组织管理:企业账号级' ||
+      !view || tag('viewtype') !== '页面类型:' + view) return false;
+  if (!list.querySelector('.columnkey-tplId[role=gridcell], .noDataHelper .wui-empty')) return false;
+  // The PC terminal also offers options explicitly labeled as mobile pages.
+  const options = [...list.querySelectorAll(selector)].map(element => ({ element, name: element.textContent.trim() }))
+    .filter(({ name }) => !/[(（]移动端[)）]$/.test(name));
+  const requested = pageType ?? view;
+  const option = options.find(({ name }) => name === requested);
+  if (!option) return { status: 'page_type_not_found', candidates: options.map(({ name }) => name) };
+  if (view === requested) return { pageType: view };
+  if (state.pageTypeRequested) return false;
+  state.pageTypeRequested = true;
+  state.startedAt = performance.now();
+  state.loaded = false;
+  option.element.click();
+  return false;
+}
+
+async function openList(page, input) {
   await page.goto(workbench);
   const search = 'input[placeholder="人员/服务等"]';
   await until(() => page.evaluate(s => !!document.querySelector(s), search), 'ASP workbench search');
@@ -25,23 +90,33 @@ async function openList(page) {
     return !!entry;
   }), 'UI模板 search result');
   const keyword = '#GZTTMP011 input[placeholder="请输入关键字"]';
-  await until(() => page.evaluate(s => !!document.querySelector(s), keyword), 'template tree');
-  await page.fill(keyword, '报销');
-  for (const name of ['财务云', '费控服务', '报账服务', '通用报销单']) {
-    await until(() => page.evaluate(n => {
-      const item = [...document.querySelectorAll('#GZTTMP011 .wui-tree-title [title]')].find(e => e.title === n);
-      if (!item) return false;
-      const li = item.closest('li');
-      if (n === '通用报销单') item.closest('a').click();
-      else if (li.classList.contains('wui-tree-treenode-close')) li.querySelector('.wui-tree-switcher').click();
-      return true;
-    }, name), name);
+  await until(() => page.evaluate(s => !!document.querySelector(s) &&
+    !!document.querySelector('#GZTTMP011 .wui-tree .tree-node-title[title]'), keyword), 'template tree');
+  const documentName = input.documentName ?? input.documentPath?.at(-1) ?? defaultDocument;
+  const documentQuery = { documentName, documentPath: input.documentPath };
+  await page.fill(keyword, documentName);
+  const documents = await until(() => page.evaluate(documentNodes, documentQuery), 'filtered template tree');
+  if (documents.length !== 1) {
+    return { status: documents.length ? 'ambiguous_document' : 'document_not_found',
+      candidates: documents.map(({ documentName, documentPath }) => ({ documentName, documentPath })) };
   }
-  await until(() => page.evaluate(() => {
-    const list = document.querySelector('#GZTTMP011');
-    return ['终端类型:PC','页面类型:通用报销单','组织管理:企业账号级'].every(flag => list.innerText.includes(flag)) &&
-      [...list.querySelectorAll('.columnkey-tplId[role=gridcell]')].some(cell => /^\d+$/.test(cell.textContent.trim()));
-  }), 'enterprise PC reimbursement templates');
+  const [{ position, documentPath }] = documents;
+  try {
+    await until(() => page.evaluate(documentNodes, { ...documentQuery, openPosition: position }),
+      'document selection for ' + documentName);
+    const selection = await until(() => page.evaluate(templateListState, { position, pageType: input.pageType }),
+      'enterprise PC templates for ' + documentName);
+    return { documentName, documentPath, ...selection };
+  } finally {
+    await page.evaluate(() => {
+      const list = document.querySelector('#GZTTMP011');
+      const key = Symbol.for('asp-template-list-load');
+      if (list?.[key]) {
+        list[key].observer.disconnect();
+        delete list[key];
+      }
+    });
+  }
 }
 
 function templateRows(input) {
@@ -67,9 +142,12 @@ function templateRows(input) {
 }
 
 async function locateDesigner(task, page, input) {
-  await openList(page);
+  const document = await openList(page, input);
+  if (document.status) return document;
   const candidates = await page.evaluate(templateRows, input);
-  if (candidates.length !== 1) return { status: candidates.length ? 'ambiguous_template' : 'template_not_found', candidates };
+  if (candidates.length !== 1) {
+    return { ...document, status: candidates.length ? 'ambiguous_template' : 'template_not_found', candidates };
+  }
   const [target] = candidates;
   const previous = (await task.tabs()).map(tab => tab.label);
   const action = await until(() => page.evaluate(templateRows, { ...input, openId: target.templateId }),
@@ -87,7 +165,7 @@ async function locateDesigner(task, page, input) {
   const tab = await until(async () => (await task.tabs()).find(tab => tab.label && !previous.includes(tab.label) &&
     tab.url.startsWith(workbench + 'iuap-yonbuilder-designer/') &&
     tab.title.replace(/\s*-\s*单据设计器$/, '') === target.templateName), 'designer for ' + target.templateName);
-  return { ...target, designerUrl: tab.url, pageLabel: tab.label };
+  return { ...document, ...target, designerUrl: tab.url, pageLabel: tab.label };
 }
 
 // Executed in the designer tab. Use YonCode's own field actions and save flow.
@@ -98,30 +176,59 @@ async function designerModel(input) {
   if (!tree?.children || !tools?.get('ai.page.save') || typeof scene.aiPageSave !== 'function') return false;
 
   const templateName = document.title.replace(/\s*-\s*单据设计器$/, '');
-  if (tree.cBillNo !== 'znbzbx_expensebill' || (input.templateName && input.templateName !== templateName)) {
+  const billNo = tree.cBillNo;
+  if (!billNo || (input.billNo && input.billNo !== billNo) ||
+      (input.templateName && input.templateName !== templateName)) {
     return { status: 'template_mismatch' };
   }
+  const templates = tree.children.filter(node => node.uiTable === 'BillTemplateBase' && !node.isDeleted);
+  const template = templates.find(node => String(node.iTplId) === input.templateId);
+  if (templates.length && !template) return { status: 'template_mismatch' };
+
+  const fieldScope = input.fieldScope ?? 'header';
+  const entities = tree.children.find(node => node.uiTable === 'BillEntityBaseList');
+  const headerEntity = entities?.children?.find(node => node.bMain === true)?.cCode ?? billNo;
+  const matchesScope = node => node.entityCode && (node.entityCode === headerEntity ? 'header' : 'detail') === fieldScope &&
+    (!input.detailEntity || node.entityCode === input.detailEntity) &&
+    (!input.entityCode || node.entityCode === input.entityCode);
+  const fieldIdOf = node => node.id ? String(node.id) : undefined;
+  const matchesIdentity = node => {
+    if (input.fieldId && fieldIdOf(node) !== input.fieldId) return false;
+    if (input.nid) {
+      // The designer can assign a new nid each time it opens a stored field.
+      return (input.fieldId || node.nid === input.nid) && node.cItemName === input.field;
+    }
+    return (!input.fieldNid || node.nid === input.fieldNid) &&
+      [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field);
+  };
   const matches = [];
   function visit(node) {
-    if (node.uiTable === 'BillItemBase' && node.entityCode === 'znbzbx_expensebill' &&
-        String(node.iTplId) === input.templateId && !node.isDeleted &&
-        (input.nid ? node.nid === input.nid && node.cItemName === input.field :
-          [node.cItemName, node.cShowCaption, node.cCaption, node.uititle].includes(input.field))) {
+    if (node.isDeleted) return;
+    if (node.uiTable === 'BillItemBase' && node.nid && node.cItemName &&
+        String(node.iTplId) === input.templateId && matchesScope(node) &&
+        matchesIdentity(node)) {
       matches.push(node);
     }
     node.children?.forEach(visit);
   }
-  visit(tree);
-  const identify = node => ({ field: node.cItemName, fieldName: node.cShowCaption, nid: node.nid });
+  visit(template ?? tree);
+  const identify = node => ({ fieldScope, entityCode: node.entityCode, field: node.cItemName,
+    fieldName: node.cShowCaption || node.cCaption || node.uititle || node.cItemName, nid: node.nid,
+    ...(fieldIdOf(node) ? { fieldId: fieldIdOf(node) } : {}) });
   if (matches.length !== 1) {
     return { status: matches.length ? 'ambiguous_field' : 'field_not_found', candidates: matches.map(identify) };
   }
-  const identity = { templateId: input.templateId, templateName, ...identify(matches[0]) };
+  const identity = { templateId: input.templateId, templateName, billNo, ...identify(matches[0]) };
   const { nid } = identity;
   const props = scene.propSettingModel;
-  if (props.innerTplNode?.nid !== nid || !props.innerCompMeta) {
+  const hasFieldPanel = () => props.innerTplNode?.nid === nid && props.innerCompMeta;
+  if (!hasFieldPanel()) {
     scene.updateCurrNode(nid);
-    return false;
+    // Reissuing selection too quickly postpones the designer's debounced update.
+    for (let attempt = 0; attempt < 15 && !hasFieldPanel(); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!hasFieldPanel()) return false;
   }
 
   const meta = props.innerCompMeta;
@@ -134,6 +241,7 @@ async function designerModel(input) {
   const properties = referenceType && !meta.getProp(referenceType.code)
     ? [...meta.normalProps, referenceType]
     : meta.normalProps;
+  if (!properties.length) return { status: 'field_properties_unavailable', ...identity };
   const getProp = key => meta.getProp(key) ?? (key === referenceType?.code ? referenceType : undefined);
   const actions = {
     formula: ['ai.elem.setFormula', value => value === null ? {} : { formula: value.expression, formulaDisplay: value.display }],
@@ -249,7 +357,7 @@ async function designerModel(input) {
   }
   const saved = await execute('ai.page.save', {});
   if (!saved?.success) throw new Error('Designer save failed: ' + JSON.stringify(saved));
-  return { changed: true };
+  return { ...identity, changed: true };
 }
 
 export async function locateModel(task, page, input) {
@@ -281,7 +389,8 @@ export async function updateModel(task, page, input) {
       if (request.method !== 'POST' || request.url.split('?')[0] !== endpoint.href) continue;
       try {
         const business = JSON.parse(JSON.parse(request.postData).businessJson);
-        if (business.tplId === input.templateId && business.billNo === 'znbzbx_expensebill') requests.add(params.requestId);
+        const billNo = result.billNo ?? input.billNo;
+        if (billNo && business.tplId === input.templateId && business.billNo === billNo) requests.add(params.requestId);
       } catch { /* The browser can omit large request bodies from its event buffer. */ }
     }
     if (method === 'Network.responseReceived' && requests.has(params.requestId) &&

@@ -10,11 +10,11 @@ const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { createMcpServer } = require('../src/mcp');
 const { createService } = require('../src/service');
 
-async function setup(t, { required = false, ambiguous = false, properties } = {}) {
+async function setup(t, { required = false, ambiguous = false, properties, identityOverrides = {}, verifyOverrides = {} } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'asp-template-test-'));
   let next = 0;
   const calls = [];
-  const identity = { templateId: 'template-1', templateName: 'General', transactionType: 'Travel', field: 'department', fieldName: 'Department' };
+  const identity = { templateId: 'template-1', templateName: 'General', transactionType: 'Travel', field: 'department', fieldName: 'Department', ...identityOverrides };
   const adapter = {
     async run(options) {
       const step = options.code.match(/workflow\.(locateModel|updateModel|verifyModel|locate|update|verify)\(/)[1];
@@ -26,7 +26,7 @@ async function setup(t, { required = false, ambiguous = false, properties } = {}
         ? { status: 'ambiguous_template', candidates: [{ templateId: 'template-1' }, { templateId: 'template-2' }] }
         : { ...identity, required, designerUrl: 'https://example.test/designer', pageLabel: 'p1' };
       if (step === 'update') { required = options.args.desired; result = { changed: true }; }
-      if (step === 'verify') result = { ...identity, required };
+      if (step === 'verify') result = { ...identity, required, ...verifyOverrides };
       return { state: 'succeeded', result, spaceId: 41, executionStopped: true };
     },
     async finish() { return { state: 'succeeded', executionStopped: true }; },
@@ -105,4 +105,28 @@ test('MCP inspect returns the complete large property list without a write', asy
   assert.equal(result.status, 'inspected');
   assert.deepEqual(result.properties, properties);
   assert.deepEqual(calls.map(call => call.step), ['locateModel', 'verifyModel']);
+});
+
+
+test('MCP rejects reuse of a request ID for a different document without another write', async t => {
+  const { client, calls } = await setup(t);
+  const first = await client.callTool({ name: 'asp_ui_template_update_field', arguments: { ...args, documentName: 'Purchase order' } });
+  assert.notEqual(first.isError, true, JSON.stringify(first.structuredContent));
+  const second = await client.callTool({ name: 'asp_ui_template_update_field', arguments: { ...args, documentName: 'Sales order' } });
+  assert.equal(second.isError, true);
+  assert.match(JSON.stringify(second.structuredContent), /REQUEST_CONFLICT|different payload/i);
+  assert.equal(calls.filter(call => call.step === 'update').length, 1);
+});
+
+
+test('MCP readback uses stable field ID across node changes and rejects another field ID', async t => {
+  for (const [verifyOverrides, verified] of [
+    [{ nid: 'new-node', fieldId: 'stable-id' }, true],
+    [{ nid: 'node-1', fieldId: 'other-id' }, false],
+  ]) {
+    const { client } = await setup(t, { identityOverrides: { nid: 'node-1', fieldId: 'stable-id' }, verifyOverrides });
+    const response = await client.callTool({ name: 'asp_ui_template_update_field', arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response.structuredContent));
+    assert.equal(response.structuredContent.data.verified, verified);
+  }
 });

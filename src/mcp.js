@@ -17,7 +17,7 @@ const formula = z.union([text, z.object({ expression: text, display: z.string().
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: 'ASP UAT 通用报销单的表头字段配置使用 asp_ui_template_update_field。给出模板名和字段名即可。changes={} 可读取该字段实际提供的属性。For other browser workflows recall a procedure with run_begin, use browser_run for official ego code, poll run_get, then independently observe business results before run_finish. Browser code receives task, page and input. Use ego-browser documented methods; run_finish owns Space cleanup. Never resend an unresolved write with a new requestId.'
+    instructions: 'ASP UAT 的 PC 单据 UI 模板字段（表头或明细列）使用 asp_ui_template_update_field。按单据名、模板和字段定位，changes={} 读取可用属性。For other browser workflows recall a procedure with run_begin, use browser_run for official ego code, poll run_get, then independently observe business results before run_finish. Browser code receives task, page and input. Use ego-browser documented methods; run_finish owns Space cleanup. Never resend an unresolved write with a new requestId.'
   });
   const register = (name, description, inputSchema, method) => server.registerTool(name, {
     description, inputSchema, outputSchema: output
@@ -34,9 +34,16 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
-  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 通用报销单表头字段。给出模板名或 ID、字段名或编码。支持必填、显示、允许修改、标题、公式，以及该字段开放的默认值、提示文本、布局占比、输入长度、金额精度、取值范围等属性。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
+  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。给出单据、模板名或 ID、字段名或编码；同名项返回候选。默认使用通用报销单表头。用 changes={} 查看实际属性及选项，用 changes.properties 传精确属性名或编码，公式用 changes.formula。设计器提交原生保存 POST，工具重新打开模板核对。重试沿用 requestId。', {
     requestId: text, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
+    documentName: text.optional().describe('工作台 UI 模板树中的单据名称。默认通用报销单。'),
+    documentPath: z.array(text).nonempty().optional().describe('从业务域到单据名称的完整目录路径，用于区分同名单据。'),
+    pageType: text.optional().describe('工作台选定单据下的 PC 页面类型名称。省略时使用该单据的默认页面。'),
     designerUrl: z.string().url().optional(), field: text,
+    fieldScope: z.enum(['header', 'detail']).optional().describe('header 表头，detail 明细列。默认表头。'),
+    detailEntity: text.optional().describe('候选明细表的实体编码，提供后按明细定位。'),
+    fieldId: text.optional().describe('候选中的持久字段 ID，优先用于区分同一实体内的同名字段。'),
+    fieldNid: text.optional().describe('设计器节点 ID。缺少持久字段 ID 时，可用稳定的节点 ID 区分同名字段。'),
     changes: z.object({
       required: z.boolean().optional(), visible: z.boolean().optional(), editable: z.boolean().optional(),
       caption: text.optional(), formula: formula.optional().describe('计算公式表达式或带 display 的对象。null 清空公式。'),

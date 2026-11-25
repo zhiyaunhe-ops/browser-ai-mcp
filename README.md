@@ -39,7 +39,7 @@ npm ci
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
 
-ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 All Seasons Property 工作台，修改 PC 通用报销单的表头字段。按模板名称或 ID 和字段名称或编码定位。通过工作台查找时可用 `transactionType` 区分交易类型。重试同一操作时沿用原 `requestId`。
+ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 All Seasons Property 工作台，读取或修改 PC 单据设计器的表头字段和明细列。通过工作台查找企业账号级模板时，`documentName` 指定业务树中的单据，模板和字段均可按名称或标识定位，同名模板可用 `transactionType` 区分。省略单据和字段位置时沿用通用报销单表头。重试同一操作时沿用原 `requestId`。
 
 ```json
 {
@@ -50,13 +50,17 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 }
 ```
 
+- 配置其他单据时提供实际的 `documentName` 和模板名。同名单据可用候选里的完整 `documentPath` 确认。选择明细列时传 `fieldScope: "detail"`。多个明细表存在同名列时，通过候选返回的 `entityCode` 填写 `detailEntity`；同一实体仍有多个字段节点时，优先用候选的 `fieldId` 指定持久字段 ID。
+- 例如，选择差旅费报销单可以传 `"documentName": "差旅费报销单", "templateName": "Travel Claim (ASP)"`；个人借款单可以传 `"documentName": "个人借款单", "templateName": "Personal Loan Slip (ASP)"`。首次使用某列时，可用 `changes: {}` 查看属性。
+- 同一单据有多个 PC 页面类型时，`pageType` 可指定工作台上的实际标签，例如“还款单列表”。只有已配置租户模板、且使用同一单据设计器字段模型的页面才能继续修改。
+- 查看培训报销模板的明细金额列时，沿用示例中的模板名，将 `field` 改为 `nexpensemny`，并传 `fieldScope: "detail"`、`detailEntity: "znbzbx_expensebill_b"` 和 `changes: {}`。
 - `changes` 支持 `required`（必填）、`visible`（显示）、`editable`（允许修改）、`caption`（标题）。给定模板和字段后，传 `changes: {}` 可查看该字段实际开放的属性、编码、控件类型、当前值和禁用状态。
 - 用 `changes.properties` 按编码或面板上的精确属性名修改。例如报销说明可以传 `{"无数据时提示文本": "请填写报销事由", "输入长度": 200}`。默认值、布局占比和其他属性同样按字段元数据处理；有下拉选项时使用选项的 `value`。回读结果以属性编码为键。
 - 金额字段还可能提供精度、最大值、最小值和千分位；日期字段的“默认值”可能是默认值类型选项。先读目标字段的属性，可获取该模板采用的实际编码和值类型。
 - 枚举和参照编码通过设计器对应动作设置。参照字段是否允许修改编码以设计器判断为准，属性清单中的 `disabled` 会反映该限制。
 - `changes.formula` 接收用友公式表达式、`{"expression": "...", "display": "..."}` 或 `null`。设计器负责解析表达式和生成触发字段及函数清单。传 `null` 清空计算公式。
 - 同时提供 `templateId` 和工作台打开的 `designerUrl` 可全程走无点击路径。设计器 URL 内的 `PT…` 编码与工作台模板 ID 是两个不同的标识。通过模板名称或 ID 搜索时，仍由工作台打开设计器。
-- 字段属性按模板 ID、表头字段编码和节点 ID 定位。设计器负责构造保存 POST，工具在新页面独立读回同一节点。保存请求里的模板 ID 与本次目标一致且收到对应响应时，`savePost` 返回请求方法、路径、模板 ID 和 HTTP 状态。当前值已符合要求时跳过保存。
+- 保存及独立回读按单据编码、模板 ID、表头或明细实体、字段编码和持久字段 ID 核对；缺少持久 ID 时核对节点 ID。设计器负责构造保存 POST。请求中的单据编码和模板 ID 均与目标一致且收到对应响应时，`savePost` 返回请求方法、路径、模板 ID 和 HTTP 状态。当前值已符合要求时跳过保存。
 - 只传 `required` 且省略 `designerUrl` 时，`before` 和 `after` 仍是布尔值。其他模式按属性编码返回值。
 
 ## 页面提醒

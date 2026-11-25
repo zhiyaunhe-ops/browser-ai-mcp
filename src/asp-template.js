@@ -11,15 +11,21 @@ const workbench = 'https://global.yonyoucloud.com/';
 
 async function updateTemplateField(service, input) {
   const { requestId, templateId, templateName, transactionType, field, changes, designerUrl: directUrl } = input;
+  const { documentName, documentPath, pageType, fieldScope, detailEntity, fieldId, fieldNid } = input;
+  const selection = { documentName, documentPath, pageType, fieldScope: fieldScope ?? (detailEntity ? 'detail' : undefined),
+    detailEntity, fieldId, fieldNid };
   if (!templateId && !templateName) throw new Error('Provide templateId or templateName');
+  if (documentName && documentPath && documentPath.at(-1) !== documentName) throw new Error('documentPath must end with documentName');
+  if (detailEntity && fieldScope === 'header') throw new Error('detailEntity selects a detail table; use fieldScope "detail"');
   if (directUrl) {
     const url = new URL(directUrl);
     if (url.origin !== new URL(workbench).origin ||
         url.pathname !== '/iuap-yonbuilder-designer/ucf-wh/designer/apps/quickdev/index.html' ||
-        !/^#\/onepage\/design\/znbzbx\/PT\d+\/ysmdd\?/.test(url.hash)) {
-      throw new Error('Provide the ASP reimbursement designer URL from the selected workbench row');
+        !/^#\/onepage\/design\/[^/?#]+\/PT\d+\/ysmdd(?:\?|$)/.test(url.hash)) {
+      throw new Error('Provide a PC bill designer URL from the selected workbench row');
     }
     if (!templateId || transactionType) throw new Error('Direct designer access requires templateId. Omit designerUrl to match transactionType in the workbench.');
+    if (documentName || documentPath || pageType) throw new Error('Omit designerUrl to select a workbench document or page type');
   }
   const required = changes.required;
   const useModel = Boolean(directUrl) || Object.keys(changes).length !== 1 || required === undefined;
@@ -41,8 +47,8 @@ async function updateTemplateField(service, input) {
   if (templateName) criteria.push({ id: 'template-name', path: 'templateName', equals: templateName });
   if (transactionType && !useModel) criteria.push({ id: 'transaction', path: 'transactionType', equals: transactionType });
   const run = service.begin({ requestId: 'asp-template:' + requestId, url: workbench,
-    goal: JSON.stringify(useModel ? { templateId, templateName, transactionType, field, directUrl, desired }
-      : { templateId, templateName, transactionType, field, required }), criteria });
+    goal: JSON.stringify(useModel ? { templateId, templateName, transactionType, field, directUrl, desired, ...selection }
+      : { templateId, templateName, transactionType, field, required, ...selection }), criteria });
   const runId = run.runId;
 
   async function round(step, purpose, args, pageLabel = 'p1') {
@@ -73,7 +79,7 @@ async function updateTemplateField(service, input) {
   }
 
   if (useModel) {
-    const lookup = await round('locateModel', 'observe', { templateId, templateName, transactionType, field, designerUrl: directUrl, desired });
+    const lookup = await round('locateModel', 'observe', { templateId, templateName, transactionType, field, designerUrl: directUrl, desired, ...selection });
     if (lookup.state !== 'succeeded') return interrupted(lookup);
     const { designerUrl, pageLabel, values: before, properties: _properties, matches, ...identity } = lookup.result;
     if (identity.status) {
@@ -89,7 +95,7 @@ async function updateTemplateField(service, input) {
     const observed = await round('verifyModel', 'observe', target);
     if (observed.state !== 'succeeded') return interrupted(observed);
     const actual = observed.result;
-    const verified = actual.templateId === identity.templateId && actual.nid === identity.nid && actual.matches === true;
+    const verified = sameField(actual, identity) && actual.matches === true;
     const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
     await finish(verified ? 'succeeded' : 'failed', verified ? 'Read the field model in a fresh designer' :
       'Reopened designer did not show the requested properties', verified ? verification : []);
@@ -101,17 +107,13 @@ async function updateTemplateField(service, input) {
       ...(write?.error ? { writeError: write.error.message } : {}) };
   }
 
-  const lookup = await round('locate', 'observe', { templateId, templateName, transactionType, field });
+  const lookup = await round('locate', 'observe', { templateId, templateName, transactionType, field, ...selection });
   if (lookup.state !== 'succeeded') return interrupted(lookup);
-  const { designerUrl, pageLabel, ...target } = lookup.result;
-  if (target.status) {
-    await finish('cancelled', target.status);
-    return { runId, ...target };
+  const { designerUrl, pageLabel, required: before, ...identity } = lookup.result;
+  if (identity.status) {
+    await finish('cancelled', identity.status);
+    return { runId, ...identity };
   }
-  const before = target.required;
-  const identity = { templateId: target.templateId, templateName: target.templateName,
-    transactionType: target.transactionType, field: target.field, fieldName: target.fieldName,
-    ...(target.nid ? { nid: target.nid } : {}) };
   let write;
   if (before !== required) {
     write = await round('update', 'execute', { ...identity, designerUrl, desired: required }, pageLabel);
@@ -120,14 +122,20 @@ async function updateTemplateField(service, input) {
   const observed = await round('verify', 'observe', { ...identity, designerUrl });
   if (observed.state !== 'succeeded') return interrupted(observed);
   const actual = observed.result;
-  const verified = actual.templateId === target.templateId && actual.field === target.field &&
-    (!target.nid || actual.nid === target.nid) && actual.required === required;
+  const verified = sameField(actual, identity) && actual.required === required;
   const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
-  await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested header field' :
+  await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested field' :
     'Reopened template did not show the requested property', verified ? verification : []);
   return { runId, ...identity, before, after: actual.required ?? null, verified, observationId: observed.observationId,
     status: verified ? write?.result?.changed ? 'updated' : before === required ? 'already_set' : 'verified' : 'verification_failed',
     ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
     ...(write?.error ? { writeError: write.error.message } : {}) };
+}
+function sameField(observed, selected) {
+  // Some designers allocate fresh node IDs when reopened. Their persisted
+  // field ID identifies the same control across loads.
+  const idKey = selected.fieldId ? 'fieldId' : 'nid';
+  return ['templateId', 'field', idKey, 'billNo', 'fieldScope', 'entityCode'].every(key =>
+    selected[key] === undefined || observed[key] === selected[key]);
 }
 module.exports = { updateTemplateField };
