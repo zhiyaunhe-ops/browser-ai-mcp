@@ -260,23 +260,24 @@ class Store {
   }
 
   legacyDomainContexts() {
-    return this.db.prepare(`SELECT r.id AS runId,
-      json_extract(r.json, '$.goal') AS goal,
-      json_extract(r.json, '$.url') AS url,
-      json_extract(r.json, '$.reviewId') AS reviewId,
-      (SELECT substr(q.id, 12) FROM entities q
-       WHERE q.kind = 'request' AND q.id GLOB 'run_begin::*'
-         AND json_extract(q.json, '$.runId') = r.id LIMIT 1) AS requestId,
-      (SELECT json_group_array(DISTINCT json_object(
-        'business_tool', json_extract(x.json, '$.businessTool'),
-        'node_name', json_extract(x.json, '$.args.nodeName'),
-        'document_name', json_extract(x.json, '$.args.documentName'),
-        'document_path', json_extract(x.json, '$.args.documentPath')))
-       FROM entities x WHERE x.kind = 'execution' AND json_extract(x.json, '$.runId') = r.id
-         AND json_extract(x.json, '$.businessTool') IS NOT NULL) AS namedTools,
-      CASE WHEN json_valid(json_extract(r.json, '$.goal'))
-        THEN json_extract(r.json, '$.goal') END AS jsonGoal
-      FROM entities r WHERE r.kind = 'run' AND json_extract(r.json, '$.domain_tag') IS NULL`).all();
+    return this.db.prepare(`WITH starts AS MATERIALIZED (
+      SELECT json_extract(json, '$.runId') AS runId, substr(min(id), 12) AS requestId
+      FROM entities WHERE kind = 'request' AND id GLOB 'run_begin::*' GROUP BY runId
+    ), tools AS MATERIALIZED (
+      SELECT json_extract(json, '$.runId') AS runId,
+        json_group_array(DISTINCT json_object(
+          'business_tool', json_extract(json, '$.businessTool'),
+          'node_name', json_extract(json, '$.args.nodeName'),
+          'document_name', json_extract(json, '$.args.documentName'),
+          'document_path', json_extract(json, '$.args.documentPath'))) AS namedTools
+      FROM entities WHERE kind = 'execution' AND json_extract(json, '$.businessTool') IS NOT NULL
+      GROUP BY runId
+    )
+    SELECT r.id AS runId, json_extract(r.json, '$.goal') AS goal, json_extract(r.json, '$.url') AS url,
+      json_extract(r.json, '$.reviewId') AS reviewId, starts.requestId, coalesce(tools.namedTools, '[]') AS namedTools,
+      CASE WHEN json_valid(json_extract(r.json, '$.goal')) THEN json_extract(r.json, '$.goal') END AS jsonGoal
+    FROM entities r LEFT JOIN starts ON starts.runId = r.id LEFT JOIN tools ON tools.runId = r.id
+    WHERE r.kind = 'run' AND json_extract(r.json, '$.domain_tag') IS NULL`).all();
   }
 
   currentReviewSummaries(domainTag) {
