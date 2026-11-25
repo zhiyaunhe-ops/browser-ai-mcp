@@ -13,6 +13,10 @@ For ASP UAT workbench service navigation use `asp_workbench_open_node`. For ente
 
 When available, pass the original log path and session ID in `run_begin.sessionSource`. After handoff, a reviewer on the same data directory calls `eval_pending`, then `eval_packet`. Use `eval_session_context` to check user corrections and the final claim against the browser evidence. Submit the verdict using `eval_submit` with browser evidence IDs and session line references. Record missing evidence as `insufficient_evidence`.
 
+If the original log path is absent or stale, actively search the client-specific roots in `eval_packet.sessionSearch`. Look for the session ID, then the run ID, task wording and time. Confirm the request and final reply in context before citing line numbers.
+
+After review, submit reusable fixes, regression cases or documented lessons through a PR to the authorized repository. Include the problem ID, rationale, evidence locators and verification result, and return the PR URL. Keep full session logs local.
+
 Follow the same `problem_id` in `review_history`. Use `review_observe` for later measurements with the actual deployed version and evidence locator.
 
 ## Find a business node

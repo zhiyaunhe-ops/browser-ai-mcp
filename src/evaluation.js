@@ -4,7 +4,7 @@ const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
 const { callReviewToolkit, resolveDomainTag } = require('./review-toolkit');
-const { sessionContext } = require('./session-context');
+const { sessionContext, sessionSearch } = require('./session-context');
 const { edition } = require('./service');
 const text = z.string().min(1);
 const editionField = { domain_tag: text.optional() };
@@ -28,9 +28,10 @@ const assessment = {
   reviewerModel: text, verdict, criterionResults: z.array(criterionResult).max(30), evidenceIds: ids, summary,
   memory: memory.optional()
 };
+const deliveryHint = 'If the review produced a reusable fix, regression case or documented lesson, open a PR on the authorized repository. Include the problem ID, change rationale, evidence locators and verification result, and return the PR URL. Keep the full session log local.';
 const memoryOrigin = z.enum(['run_begin', 'eval_submit']);
 const report = z.object({ runId: text, reviewKey: text, reviewId: text, submittedAt: z.number(),
-  ...editionField, ...assessment, sessionRefs: sessionRefs.optional(), memoryOrigin: memoryOrigin.optional() });
+  ...editionField, ...assessment, deliveryHint: text.optional(), sessionRefs: sessionRefs.optional(), memoryOrigin: memoryOrigin.optional() });
 const relatedReview = z.object({ attemptId: text, ...editionField, problemId: text.optional(), goal: text.optional(), verdict: verdict.optional() });
 const error = (code, message) => Object.assign(new Error(message), { code });
 
@@ -53,7 +54,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
   }));
   return { schemaVersion: 1, runId, reviewKey: run.feedback.requestId, reviewState,
     ...edition(run.domain_tag), goal: run.goal, url: run.url,
-    ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
+    sessionSearch: sessionSearch(), ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
     lastWriteSequence: run.lastWriteSequence ?? 0, verification: run.feedback.verification,
     readbacks: service.criterionReadbacks(run), gaps: service.gaps(runId), relatedReviews,
     ...(run.reviewMemory ? { reviewMemory: run.reviewMemory } : {}),
@@ -102,7 +103,7 @@ function submit(service, input) {
       throw error('EVAL_MEMORY_CONFLICT', 'Keep the reviewMemory preregistered in run_begin.');
     }
     const reviewId = service.id();
-    const review = { runId, reviewKey, reviewId, submittedAt: service.now(), ...evaluated, ...(sessionRefs ? { sessionRefs } : {}),
+    const review = { runId, reviewKey, reviewId, submittedAt: service.now(), ...evaluated, deliveryHint, ...(sessionRefs ? { sessionRefs } : {}),
       ...edition(run.domain_tag),
       ...(evaluated.memory ? { memoryOrigin: run.reviewMemory ? 'run_begin' : 'eval_submit' } : {}) };
     service.store.put('evaluation', reviewId, review);
@@ -130,6 +131,7 @@ function registerEvaluationTools(register, service) {
   register('eval_packet', '评估模型读取任务目标、验收条件、执行结果、独立回读和采集缺口。用 evidence_query 补读记录与请求。将 relatedReviews 中的 attemptId 填入 review_history 的 attempt_id 查询往期评估。同一问题的后续尝试沿用 problem_id，翻页和提交沿用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
     args => service.store.transaction(() => packet(service, args)),
     z.object({ schemaVersion: z.literal(1), ...runId, ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
+      sessionSearch: z.object({ roots: z.array(z.object({ client: text, path: text })), instructions: text }),
       criteria: z.array(z.object({ id: text, path: z.string(), equals: z.unknown() })), executionOutcome: text,
       executionNote: z.string(), verification: z.array(z.object({ criterionId: text, observationId: text })),
       readbacks: z.array(z.object({ criterionId: text, found: z.boolean(), observationId: text.optional(),

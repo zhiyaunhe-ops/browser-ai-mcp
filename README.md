@@ -79,6 +79,21 @@ npm ci
 }
 ```
 
+### 在本机找回对应会话
+
+先读 `eval_packet.sessionSource.path`。路径缺失或已移动时，请主动在 `sessionSearch.roots` 返回的本机候选目录及子目录中查找；先搜 session ID，再按 run ID、任务原话和时间缩小范围。
+
+| 客户端 | 常见目录 |
+| --- | --- |
+| Codex | `~/.codex/sessions/`、`~/.codex/archived_sessions/`，设置了 `CODEX_HOME` 时使用该目录下的同名子目录 |
+| YonBuddy（Windows） | `%APPDATA%/yonyou-bridge/codex-home/sessions/` 和同级 `archived_sessions/`，也可由 `YONCLAW_YONBUDDY_HOME` 指定根目录 |
+| Claude Code | `~/.claude/projects/<项目目录>/`，或 `CLAUDE_CONFIG_DIR` 下的 `projects/` |
+| DSH | `~/.dsh/sessions/`，或 `DSH_SESSIONS_ROOT` 指定的目录 |
+
+核对用户请求、纠正和最后答复后再引用文件及行号。普通 JSONL 可用 `eval_session_context`；DSH 压缩日志需用支持 zstd 的读取器。证据不足时，在评估中说明缺口。
+
+评估完成后，建议将可复用的修复、回归用例或操作经验通过 PR 提交到获授权的仓库。PR 写明问题编号、改动理由、证据位置及验证结果，并将 PR 链接回传；原始会话日志留在本机。
+
 在 `run_begin` 的 `reviewMemory` 字段传入以下结构，可以预登记跨轮复验计划。
 
 ```json
