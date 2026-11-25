@@ -84,7 +84,7 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'asp_ui_template_verify_batch', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_session_context', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_history', 'review_observe', 'run_begin', 'run_finish', 'run_get', 'run_summary',
+    'asp_ui_template_update_field', 'asp_ui_template_verify_batch', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_session_context', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'review_apply', 'review_history', 'review_improve', 'review_improvements', 'review_observe', 'run_begin', 'run_finish', 'run_get', 'run_summary',
   ]);
 
   const beginArgs = {
@@ -811,6 +811,207 @@ test('embedded review toolkit supports session context and browser review observ
     { source: 'browser', recorded: 0, replayed: 1 });
   const history = await call('review_history', { attempt_id: review.reviewId, source: 'browser' });
   assert.ok(JSON.stringify(history).includes('session fixture lines 1-2'));
+});
+
+test('improvement loop requires a version-matched linked pass and records fail/retry attempts', async t => {
+  const { execFileSync } = require('node:child_process');
+  const nativeRequest = { src: 'ego-page', netType: 'request', requestId: 'fixture-http-1', tabId: 'main',
+    method: 'POST', url: 'https://example.test/api/items?filter=open', queryKeys: ['filter'], t: 1 };
+  const requestCapture = () => ({ version: 1, source: 'ego-page', status: 'captured', capturedRequests: 1, gaps: [],
+    records: [nativeRequest, { ...nativeRequest, netType: 'response', status: 200, t: 2 }] });
+  const { adapter } = makeAdapter({
+    async run(options) {
+      const version = options.improvementVersion ?? options.improvement?.version ?? 'unlinked';
+      return { state: 'succeeded', result: { saved: true, improvementVersion: version }, networkCapture: requestCapture(),
+        spaceId: 41, executionStopped: true };
+    },
+  });
+  const dataDir = temporaryDirectory();
+  const artifactRepo = temporaryDirectory();
+  t.after(() => fs.rmSync(artifactRepo, { recursive: true, force: true }));
+  execFileSync('git', ['init', artifactRepo], { stdio: 'ignore' });
+  execFileSync('git', ['-C', artifactRepo, 'config', 'user.name', 'Eval Fixture'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', artifactRepo, 'config', 'user.email', 'eval-fixture@example.test'], { stdio: 'ignore' });
+  const artifactPath = path.join(artifactRepo, 'scripts', 'verify-saved.js');
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(artifactPath, 'module.exports = () => false;\n', 'utf8');
+  execFileSync('git', ['-C', artifactRepo, 'add', 'scripts/verify-saved.js'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', artifactRepo, 'commit', '-m', 'fixture baseline', '-m', 'Submitted-by: Codex (GPT-6)'], { stdio: 'ignore' });
+  fs.writeFileSync(artifactPath, 'module.exports = () => true;\n', 'utf8');
+  execFileSync('git', ['-C', artifactRepo, 'add', 'scripts/verify-saved.js'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', artifactRepo, 'commit', '-m', 'fix saved indicator', '-m', 'Submitted-by: Codex (GPT-6)'], { stdio: 'ignore' });
+  const version = execFileSync('git', ['-C', artifactRepo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const criterion = { id: 'saved', path: 'saved', equals: true };
+  const sourceRun = await call('run_begin', { requestId: 'improve-source-start', url: 'https://example.test/',
+    goal: 'Repair the saved indicator', criteria: [] });
+  const sourceEvidence = await call('browser_run', { runId: sourceRun.runId, requestId: 'improve-source-observe',
+    purpose: 'observe', code: 'return { saved: false };' });
+  await waitForExecution(client, sourceRun.runId, sourceEvidence.executionId);
+  await call('run_finish', { runId: sourceRun.runId, requestId: 'improve-source-finish', outcome: 'unknown', note: 'Initial evidence only.' });
+  const sourcePacket = await call('eval_packet', { runId: sourceRun.runId });
+  const sourceReview = await call('eval_submit', { runId: sourceRun.runId, requestId: 'improve-source-review',
+    reviewKey: sourcePacket.reviewKey, reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence',
+    criterionResults: [], evidenceIds: [], summary: { result: 'Needs a reusable fix.', lessons: [], limitations: [] } });
+
+  const planned = await call('review_improve', { reviewId: sourceReview.reviewId, requestId: 'improve-plan', kind: 'script',
+    problemId: 'fixture-saved-indicator', change: 'Add a script regression check for the persisted saved indicator.', criterion });
+  assert.equal(planned.state, 'planned');
+  const applied = await call('review_apply', { improvementId: planned.improvementId, requestId: 'improve-apply',
+    artifact: { repository: artifactRepo, commit: version, file: 'scripts/verify-saved.js' } });
+  assert.equal(applied.state, 'applied');
+  assert.equal(applied.artifact.version, version);
+  const staleLink = await client.callTool({ name: 'run_begin', arguments: { requestId: 'stale-improvement-version',
+    url: 'https://example.test/', goal: 'Verify old artifact', criteria: [criterion],
+    improvement: { improvementId: planned.improvementId, version: 'c'.repeat(40) } } });
+  assert.equal(staleLink.isError, true);
+  assert.equal(staleLink.structuredContent.data.code, 'IMPROVEMENT_INVALID');
+
+  const requestPlan = await call('review_improve', { reviewId: sourceReview.reviewId, requestId: 'request-improve-plan', kind: 'request',
+    problemId: 'fixture-saved-indicator', change: 'Build the observed request with validated parameters.', criterion });
+  const sourceRequest = (await call('evidence_query', { runId: sourceRun.runId, view: 'records' })).records
+    .find(record => record.kind === 'network' && record.payload.netType === 'request');
+  assert.ok(sourceRequest, 'source review must carry a captured request record');
+  const callerOnlyEvidence = await client.callTool({ name: 'review_apply', arguments: { improvementId: requestPlan.improvementId,
+    requestId: 'request-improve-apply', artifact: { repository: artifactRepo, commit: version,
+      file: 'scripts/verify-saved.js', evidenceId: 'caller-asserted-request-id' } } });
+  assert.equal(callerOnlyEvidence.isError, true);
+  assert.equal(callerOnlyEvidence.structuredContent.data.code, 'IMPROVEMENT_ARTIFACT');
+  const stillPlanned = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items
+    .find(row => row.improvementId === requestPlan.improvementId);
+  assert.equal(stillPlanned.state, 'planned');
+  const requestApplied = await call('review_apply', { improvementId: requestPlan.improvementId, requestId: 'request-improve-apply-valid',
+    artifact: { repository: artifactRepo, commit: version, file: 'scripts/verify-saved.js', evidenceId: sourceRequest.recordId } });
+  assert.equal(requestApplied.state, 'applied');
+  assert.deepEqual({ method: requestApplied.artifact.request.method, url: requestApplied.artifact.request.url,
+    queryKeys: requestApplied.artifact.request.queryKeys }, { method: 'POST', url: nativeRequest.url, queryKeys: ['filter'] });
+
+  async function runReview(prefix, { linked = false, improvementId = planned.improvementId, linkedVersion = version,
+    verdict = 'pass', adapterVersion = version } = {}) {
+    adapter.run = async () => ({ state: 'succeeded', result: { saved: true, improvementVersion: adapterVersion },
+      networkCapture: requestCapture(), spaceId: 41, executionStopped: true });
+    const run = await call('run_begin', { requestId: `${prefix}-start`, url: 'https://example.test/',
+      goal: 'Verify the saved indicator', criteria: [criterion],
+      ...(linked ? { improvement: { improvementId, version: linkedVersion } } : {}) });
+    const write = await call('browser_run', { runId: run.runId, requestId: `${prefix}-write`, purpose: 'execute', code: 'return { saved: true };' });
+    await waitForExecution(client, run.runId, write.executionId);
+    const observe = await call('browser_run', { runId: run.runId, requestId: `${prefix}-observe`, purpose: 'observe', code: 'return { saved: true };' });
+    const observed = await waitForExecution(client, run.runId, observe.executionId);
+    const outcome = verdict === 'pass' ? 'succeeded' : 'failed';
+    const finish = await call('run_finish', { runId: run.runId, requestId: `${prefix}-finish`, outcome,
+      ...(verdict === 'pass' ? { verification: [{ criterionId: criterion.id, observationId: observed.observationId }] } : {}),
+      note: `Fixture ${verdict} review.` });
+    const packet = await call('eval_packet', { runId: run.runId });
+    await call('eval_submit', { runId: run.runId, requestId: `${prefix}-review`, reviewKey: packet.reviewKey,
+      reviewerModel: 'fixture-reviewer', verdict, criterionResults: [{ criterionId: criterion.id,
+        verdict: verdict === 'pass' ? 'met' : 'unmet', reason: `Fixture ${verdict}.`, evidenceIds: [observed.observationId] }],
+      evidenceIds: [observed.observationId], summary: { result: `Fixture ${verdict}.`, lessons: [], limitations: [] } });
+    return { run, finish };
+  }
+
+  // A matching independent pass on an unrelated run cannot verify this item.
+  await runReview('unrelated-pass');
+  let item = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items.find(row => row.improvementId === planned.improvementId);
+  assert.equal(item.state, 'applied');
+
+  // A linked pass with a mismatched observed build version also remains applied.
+  await runReview('wrong-version', { linked: true, adapterVersion: 'b'.repeat(40) });
+  item = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items.find(row => row.improvementId === planned.improvementId);
+  assert.equal(item.state, 'applied');
+
+  // A linked failure records an attempt but does not close the loop.
+  await runReview('linked-failure', { linked: true, verdict: 'fail' });
+  item = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items.find(row => row.improvementId === planned.improvementId);
+  assert.equal(item.state, 'applied');
+
+  // Retrying the same improvement at the applied version with a met readback closes it.
+  await runReview('linked-retry', { linked: true });
+  item = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items.find(row => row.improvementId === planned.improvementId);
+  assert.equal(item.state, 'verified');
+  assert.ok(item.attempts.length >= 3);
+
+  await runReview('request-linked', { linked: true, improvementId: requestPlan.improvementId });
+  const requestItem = (await call('review_improvements', { reviewId: sourceReview.reviewId })).items
+    .find(row => row.improvementId === requestPlan.improvementId);
+  assert.equal(requestItem.state, 'verified', 'request verification requires the fresh same-method, URL and query-key capture');
+  assert.ok(requestItem.attempts[0].requestRecordId);
+});
+
+test('review submission can atomically plan a memory update and verifies its stored revision when used', async t => {
+  const dataDir = temporaryDirectory();
+  const { adapter } = makeAdapter({ async run() {
+    return { state: 'succeeded', result: { saved: true }, spaceId: 41, executionStopped: true };
+  } });
+  const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const criterion = { id: 'saved', path: 'saved', equals: true };
+  const source = await call('run_begin', { requestId: 'memory-source-start', url: 'https://example.test/',
+    goal: 'Keep the saved indicator guidance current', criteria: [criterion] });
+  const seedWrite = await call('browser_run', { runId: source.runId, requestId: 'memory-seed-write', purpose: 'execute', code: 'return { saved: true };' });
+  await waitForExecution(client, source.runId, seedWrite.executionId);
+  const seedObserve = await call('browser_run', { runId: source.runId, requestId: 'memory-seed-observe',
+    purpose: 'observe', code: 'return { saved: true };' });
+  const seedObserved = await waitForExecution(client, source.runId, seedObserve.executionId);
+  const initial = await call('run_finish', { runId: source.runId, requestId: 'memory-source-finish', outcome: 'succeeded',
+    decision: 'learned', note: 'Seed a reusable memory for the fixture.',
+    verification: [{ criterionId: criterion.id, observationId: seedObserved.observationId }], updates: [{ baseRevision: 0,
+      entry: { scope: 'domain', key: 'fixture-save-guidance', name: 'Fixture save guidance',
+        summary: 'Initial guidance.', goal: 'Keep the saved indicator guidance current', verification: 'unverified' } }] });
+  const memoryId = initial.feedback.changedMemoryIds[0];
+  assert.ok(memoryId);
+  const sourcePacket = await call('eval_packet', { runId: source.runId });
+  const submitted = await call('eval_submit', { runId: source.runId, requestId: 'memory-source-review',
+    reviewKey: sourcePacket.reviewKey, reviewerModel: 'fixture-reviewer', verdict: 'insufficient_evidence',
+    criterionResults: [], evidenceIds: [], summary: { result: 'A memory update is needed.', lessons: [], limitations: [] },
+    improvements: [{ kind: 'memory', problemId: 'fixture-saved-memory', change: 'Clarify how to verify the persisted saved indicator.',
+      criterion }] });
+  assert.equal(submitted.improvementIds.length, 1);
+  const improvementId = submitted.improvementIds[0];
+  let item = (await call('review_improvements', { reviewId: submitted.reviewId })).items
+    .find(row => row.improvementId === improvementId);
+  assert.equal(item.state, 'planned');
+
+  const before = await call('memory_get', { memoryId });
+  const applied = await call('review_apply', { improvementId, requestId: 'memory-apply',
+    artifact: { memoryUpdate: { memoryId, baseRevision: before.revision, patch: { summary: 'Clarified guidance.' } } } });
+  assert.equal(applied.state, 'applied');
+  assert.equal(applied.artifact.memoryId, memoryId);
+  const after = await call('memory_get', { memoryId });
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.summary, 'Clarified guidance.');
+
+  const run = await call('run_begin', { requestId: 'memory-verification-start', url: 'https://example.test/',
+    goal: 'Verify saved indicator with updated guidance', criteria: [criterion], recipeIds: [memoryId],
+    improvement: { improvementId, version: applied.artifact.version } });
+  const write = await call('browser_run', { runId: run.runId, requestId: 'memory-verification-write', purpose: 'execute', code: 'return { saved: true };' });
+  await waitForExecution(client, run.runId, write.executionId);
+  const observe = await call('browser_run', { runId: run.runId, requestId: 'memory-verification-observe',
+    purpose: 'observe', code: 'return { saved: true };' });
+  const observed = await waitForExecution(client, run.runId, observe.executionId);
+  await call('run_finish', { runId: run.runId, requestId: 'memory-verification-finish', outcome: 'succeeded',
+    decision: 'confirmed', usedMemoryIds: [memoryId], verification: [{ criterionId: criterion.id, observationId: observed.observationId }],
+    note: 'Observed the expected saved value using the updated memory.' });
+  const packet = await call('eval_packet', { runId: run.runId });
+  const review = await call('eval_submit', { runId: run.runId, requestId: 'memory-verification-review', reviewKey: packet.reviewKey,
+    reviewerModel: 'fixture-reviewer', verdict: 'pass', criterionResults: [{ criterionId: criterion.id, verdict: 'met',
+      reason: 'Independent readback matched.', evidenceIds: [observed.observationId] }], evidenceIds: [observed.observationId],
+    summary: { result: 'The revised memory was used and the criterion passed.', lessons: [], limitations: [] } });
+  assert.equal(review.improvementResult.accepted, true);
+  item = (await call('review_improvements', { reviewId: submitted.reviewId })).items
+    .find(row => row.improvementId === improvementId);
+  assert.equal(item.state, 'verified');
+  assert.equal(item.attempts[0].exposureConfirmed, true);
 });
 
 test('known historical ASP review is classified when an existing database is reopened', async t => {

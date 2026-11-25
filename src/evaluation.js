@@ -5,6 +5,7 @@ const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
 const { callReviewToolkit, resolveDomainTag } = require('./review-toolkit');
 const { sessionContext, sessionSearch } = require('./session-context');
+const { registerImprovementTools, recordVerification, link, proposal, plan } = require('./improvements');
 const { edition } = require('./service');
 const text = z.string().min(1);
 const editionField = { domain_tag: text.optional() };
@@ -28,10 +29,11 @@ const assessment = {
   reviewerModel: text, verdict, criterionResults: z.array(criterionResult).max(30), evidenceIds: ids, summary,
   memory: memory.optional()
 };
-const deliveryHint = 'If the review produced a reusable fix, regression case or documented lesson, open a PR on the authorized repository. Include the problem ID, change rationale, evidence locators and verification result, and return the PR URL. Keep the full session log local.';
+const deliveryHint = 'For actionable findings call review_improve, implement the change, use review_apply, and re-evaluate the delivered version in a fresh run. For a reusable fix, regression case or documented lesson, open a PR on the authorized repository. Include the problem ID, change rationale, evidence locators and verification result, and return the PR URL. Keep the full session log local.';
 const memoryOrigin = z.enum(['run_begin', 'eval_submit']);
 const report = z.object({ runId: text, reviewKey: text, reviewId: text, submittedAt: z.number(),
-  ...editionField, ...assessment, deliveryHint: text.optional(), sessionRefs: sessionRefs.optional(), memoryOrigin: memoryOrigin.optional() });
+  ...editionField, ...assessment, improvementResult: z.object({ improvementId: text, state: text, accepted: z.boolean(), gaps: z.array(text), nextAction: text }).optional(),
+  improvementIds: z.array(text).optional(), deliveryHint: text.optional(), sessionRefs: sessionRefs.optional(), memoryOrigin: memoryOrigin.optional() });
 const relatedReview = z.object({ attemptId: text, ...editionField, problemId: text.optional(), goal: text.optional(), verdict: verdict.optional() });
 const error = (code, message) => Object.assign(new Error(message), { code });
 
@@ -52,7 +54,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
     attemptId: lesson.reviewId, ...edition(lesson.domain_tag),
     problemId: lesson.problemId, goal: lesson.goal, verdict: lesson.verdict
   }));
-  return { schemaVersion: 1, runId, reviewKey: run.feedback.requestId, reviewState,
+  return { schemaVersion: 1, runId, ...(run.improvement ? { improvement: run.improvement } : {}), reviewKey: run.feedback.requestId, reviewState,
     ...edition(run.domain_tag), goal: run.goal, url: run.url,
     sessionSearch: sessionSearch(), ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
     lastWriteSequence: run.lastWriteSequence ?? 0, verification: run.feedback.verification,
@@ -63,7 +65,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
 
 function submit(service, input) {
   return service.store.transaction(() => {
-    const { runId, reviewKey, domain_tag, sessionRefs, requestId: _requestId, ...assessment } = input;
+    const { runId, reviewKey, domain_tag, sessionRefs, improvements, requestId: _requestId, ...assessment } = input;
     const request = service.request('eval_submit', runId, input);
     if (request.previous) return service.store.get('evaluation', request.previous.reviewId);
     const run = service.run(runId);
@@ -106,7 +108,15 @@ function submit(service, input) {
     const review = { runId, reviewKey, reviewId, submittedAt: service.now(), ...evaluated, deliveryHint, ...(sessionRefs ? { sessionRefs } : {}),
       ...edition(run.domain_tag),
       ...(evaluated.memory ? { memoryOrigin: run.reviewMemory ? 'run_begin' : 'eval_submit' } : {}) };
+    const improvementResult = recordVerification(service, run, review);
+    if (improvementResult) review.improvementResult = improvementResult;
     service.store.put('evaluation', reviewId, review);
+    if (improvements?.length) {
+      review.improvementIds = improvements.map((change, index) => plan(service, {
+        ...change, reviewId, requestId: 'eval-plan-' + index
+      }).improvementId);
+      service.store.put('evaluation', reviewId, review);
+    }
     run.reviewId = reviewId;
     service.store.put('run', runId, run);
     service.saveRequest(request, { reviewId });
@@ -116,10 +126,20 @@ function submit(service, input) {
 
 function history(service, filters) {
   const browserDb = path.join(service.store.directory, 'browser-ai.sqlite');
-  return callReviewToolkit('history', filters, ['--browser-db', browserDb]);
+  const result = callReviewToolkit('history', filters, ['--browser-db', browserDb]);
+  const items = service.store.list('improvement');
+  for (const group of result.problems) {
+    for (const attempt of group.attempts) {
+      if (attempt.source !== 'browser') continue;
+      const linked = items.filter(i => i.reviewId === attempt.attempt_id);
+      if (linked.length) attempt.localImprovements = linked;
+    }
+  }
+  return result;
 }
 
 function registerEvaluationTools(register, service) {
+  registerImprovementTools(register, service);
   const runId = { runId: text };
   const page = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(50).optional() };
   const pagination = { nextCursor: z.number(), hasMore: z.boolean() };
@@ -130,7 +150,7 @@ function registerEvaluationTools(register, service) {
     z.object({ runs: z.array(z.object({ ...runId, ...editionField, goal: text, outcome: text, reviewKey: text })), ...pagination }));
   register('eval_packet', '评估模型读取任务目标、验收条件、执行结果、独立回读和采集缺口。用 evidence_query 补读记录与请求。将 relatedReviews 中的 attemptId 填入 review_history 的 attempt_id 查询往期评估。同一问题的后续尝试沿用 problem_id，翻页和提交沿用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
     args => service.store.transaction(() => packet(service, args)),
-    z.object({ schemaVersion: z.literal(1), ...runId, ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
+    z.object({ schemaVersion: z.literal(1), ...runId, improvement: link.extend({ delivery: z.number() }).optional(), ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
       sessionSearch: z.object({ roots: z.array(z.object({ client: text, path: text })), instructions: text }),
       criteria: z.array(z.object({ id: text, path: z.string(), equals: z.unknown() })), executionOutcome: text,
       executionNote: z.string(), verification: z.array(z.object({ criterionId: text, observationId: text })),
@@ -140,8 +160,8 @@ function registerEvaluationTools(register, service) {
       rounds: z.array(z.object({ executionId: text, sequence: z.number(),
         purpose: text, state: text, observationId: text.optional(), businessTool: text.optional(),
         result: z.unknown(), error: z.unknown(), networkCapture: z.unknown() })), gaps: z.array(z.record(z.unknown())), ...pagination }));
-  register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。证据不足可标记 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
-    ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment, sessionRefs: sessionRefs.optional()
+  register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。证据不足可标记 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。可执行问题填 improvements，随评估创建具体改进项。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
+    ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment, sessionRefs: sessionRefs.optional(), improvements: z.array(proposal).max(20).optional()
   }, args => submit(service, args), report);
   register('run_summary', '读取运行结果、评估进度及独立模型已提交的结构化总结。', runId, args => {
     const run = service.run(args.runId);

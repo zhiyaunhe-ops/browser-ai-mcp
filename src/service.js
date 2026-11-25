@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const os = require('node:os');
 const { isDeepStrictEqual } = require('node:util');
+const { bindImprovement } = require('./improvements');
 const { Store } = require('./storage');
 const { Memory, matchesScope } = require('./memory');
 const { EgoAdapter } = require('./ego');
@@ -139,10 +140,10 @@ class BrowserService {
   saveRequest(request, result) {
     this.store.put('request', request.key, { id: request.key, hash: request.hash, ...result });
   }
-  record({ runId, domain_tag }, executionId, kind, payload) {
+  record({ runId, domain_tag }, executionId, kind, payload, captureSource) {
     return this.store.append({ recordId: this.id(), runId, executionId: executionId || null,
       kind, producerId: 'browser-ai-mcp', streamId: runId, source: 'mcp',
-      observedAt: this.now(), receivedAt: this.now(), ...edition(domain_tag), payload });
+      observedAt: this.now(), receivedAt: this.now(), ...edition(domain_tag), ...(captureSource ? { captureSource } : {}), payload });
   }
 
   recall(url, goal, domainTag) {
@@ -184,6 +185,7 @@ class BrowserService {
         spaceId: null, pageLabel: 'p1', name: `browser-ai:${runId}`,
         ...edition(domainTag),
         ...(reviewMemory ? { reviewMemory } : {}),
+        ...bindImprovement(this, args, domainTag),
         ...(args.sessionSource ? { sessionSource: args.sessionSource } : {}),
         recalledMemory, cleanup: { state: 'not_requested' } };
       this.store.put('run', runId, run);
@@ -328,7 +330,7 @@ class BrowserService {
         isDeepStrictEqual(execution.networkCapture ?? null, networkCapture)) return;
       const run = this.run(execution.runId);
       if (!execution.networkCapture && Array.isArray(networkRecords)) for (const payload of networkRecords) {
-        this.record(run, executionId, 'network', payload);
+        this.record(run, executionId, 'network', payload, 'ego-page');
       }
       Object.assign(execution, { state: result.state, result: result.result ?? null,
         error: result.error || null, executionStopped: result.executionStopped === true,
