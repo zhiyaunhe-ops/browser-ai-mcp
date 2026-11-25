@@ -1,6 +1,6 @@
 {
   "name": "browser-ai-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Browser automation through MCP and ego lite with scoped page readers, reusable procedures and saved execution evidence.",
   "type": "commonjs",
   "bin": {
