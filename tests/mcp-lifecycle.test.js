@@ -63,7 +63,7 @@ async function waitForExecution(client, runId, executionId) {
   assert.fail(`execution ${executionId} did not settle`);
 }
 
-test('MCP exposes nine tools and completes a verified memory workflow with idempotent requests', async t => {
+test('MCP exposes tools and completes a verified memory workflow with idempotent requests', async t => {
   const dataDir = temporaryDirectory();
   const { adapter, calls } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
@@ -78,7 +78,7 @@ test('MCP exposes nine tools and completes a verified memory workflow with idemp
   assert.ok(templateTool.inputSchema.properties.changes.properties.properties.description);
   assert.ok(templateTool.inputSchema.properties.changes.properties.formula.description);
   assert.deepEqual(listed.tools.map(item => item.name).sort(), [
-    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get',
+    'asp_ui_template_update_field', 'asp_workbench_open_node', 'asp_workbench_query_general_applications', 'asp_workbench_query_templates', 'browser_run', 'eval_packet', 'eval_pending', 'eval_submit', 'evidence_query', 'memory_get', 'memory_search', 'recipe_draft', 'run_begin', 'run_finish', 'run_get', 'run_summary',
   ]);
 
   const beginArgs = {
@@ -496,4 +496,95 @@ test('automatic request evidence is stored and referenced by a recipe draft', as
   assert.deepEqual(draft.requestEvidence.requests[0], { evidenceId: records[0].recordId,
     responseEvidenceId: records[1].recordId, executionId: invocation.executionId, method: 'POST', url: request.url,
     queryKeys: ['filter'], requestShape: request.requestShape, status: 200 });
+});
+
+test('independent clients hand off, submit and retrieve a review with scoped evidence and idempotency', async t => {
+  const dataDir = temporaryDirectory();
+  const { adapter } = makeAdapter({ async run() { return { state: 'succeeded', spaceId: 41, executionStopped: true,
+    result: { padding: 'x'.repeat(15000), customer: { code: 'C-1001' } } }; } });
+  const executorService = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const executor = await withMcp(t, executorService);
+  const reviewerService = createService({ dataDir, egoAdapter: adapter, idFactory: (() => { let n = 0; return () => `review-${++n}`; })(), waitMs: 5 });
+  const reviewer = await withMcp(t, reviewerService);
+  await reviewer.listTools();
+  const call = (client, name, args) => client.callTool({ name, arguments: args });
+  const data = response => { assert.notEqual(response.isError, true, JSON.stringify(response)); return response.structuredContent.data; };
+  const begin = async requestId => data(await call(executor, 'run_begin', { requestId, goal: 'Inspect customer',
+    url: 'https://example.test/customers', criteria: [{ id: ' customer ', path: 'customer.code', equals: 'C-1001' }] }));
+  const observe = async run => {
+    const started = data(await call(executor, 'browser_run', { runId: run.runId, requestId: `observe-${run.runId}`,
+      purpose: 'observe', code: 'return { customer: { code: "C-1001" } };' }));
+    return waitForExecution(executor, run.runId, started.executionId);
+  };
+  const run = await begin('eval-begin');
+  const other = await begin('other-begin');
+  const observation = await observe(run);
+  const foreign = await observe(other);
+  const extra = data(await call(executor, 'browser_run', { runId: run.runId, requestId: 'extra-observe', purpose: 'observe', code: 'return { ok: true };' }));
+  await waitForExecution(executor, run.runId, extra.executionId);
+  assert.equal(data(await call(reviewer, 'run_get', { runId: run.runId })).reviewState, 'not_ready');
+  const finished = data(await call(executor, 'run_finish', { runId: run.runId, requestId: ' handoff ', outcome: 'succeeded',
+    note: 'Customer observed.', verification: [{ criterionId: ' customer ', observationId: observation.observationId }] }));
+  assert.equal(finished.reviewState, 'pending');
+  assert.equal(finished.feedback.decision, 'no-change');
+  const pending = data(await call(reviewer, 'eval_pending', { limit: 1 }));
+  assert.equal(pending.runs[0].runId, run.runId);
+  const packet = data(await call(reviewer, 'eval_packet', { runId: run.runId, limit: 1 }));
+  assert.equal(packet.reviewKey, ' handoff ');
+  assert.equal(packet.readbacks[0].actual, 'C-1001');
+  assert.equal(packet.hasMore, true);
+  const missingKey = await call(reviewer, 'eval_packet', { runId: run.runId, cursor: packet.nextCursor, limit: 1 });
+  assert.equal(missingKey.isError, true);
+  assert.equal(missingKey.structuredContent.data.code, 'EVAL_STALE');
+  const next = data(await call(reviewer, 'eval_packet', { runId: run.runId, cursor: packet.nextCursor, limit: 1, reviewKey: packet.reviewKey }));
+  assert.equal(next.rounds[0].executionId, extra.executionId);
+  assert.equal(packet.rounds[0].observationId, observation.observationId);
+  const submission = { runId: run.runId, requestId: 'review-request', reviewKey: packet.reviewKey,
+    reviewerModel: 'independent-model', verdict: 'pass', criterionResults: [{ criterionId: ' customer ', verdict: 'met',
+      reason: 'Observed the customer code.', evidenceIds: [observation.observationId] }],
+    evidenceIds: [observation.observationId], summary: { result: 'Customer verified.' } };
+  const wrongEvidence = await call(reviewer, 'eval_submit', { ...submission, requestId: 'foreign',
+    evidenceIds: [foreign.observationId], criterionResults: [{ ...submission.criterionResults[0], evidenceIds: [foreign.observationId] }] });
+  assert.equal(wrongEvidence.isError, true);
+  assert.equal(wrongEvidence.structuredContent.data.code, 'EVAL_EVIDENCE');
+  const evidence = data(await call(reviewer, 'evidence_query', { runId: run.runId, view: 'records' }));
+  const selfReport = evidence.records.find(record => record.kind === 'incident').recordId;
+  const unsupported = await call(reviewer, 'eval_submit', { ...submission, requestId: 'self-report', evidenceIds: [selfReport],
+    criterionResults: [{ ...submission.criterionResults[0], evidenceIds: [selfReport] }] });
+  assert.equal(unsupported.isError, true);
+  assert.equal(unsupported.structuredContent.data.code, 'EVAL_EVIDENCE');
+  const stale = await call(reviewer, 'eval_submit', { ...submission, requestId: 'stale', reviewKey: 'old-handoff' });
+  assert.equal(stale.isError, true);
+  assert.equal(stale.structuredContent.data.code, 'EVAL_STALE');
+  const review = data(await call(reviewer, 'eval_submit', submission));
+  assert.deepEqual(data(await call(reviewer, 'eval_submit', submission)), review);
+  const conflict = await call(reviewer, 'eval_submit', { ...submission, summary: { result: 'Different result.' } });
+  assert.equal(conflict.isError, true);
+  assert.equal(conflict.structuredContent.data.code, 'REQUEST_CONFLICT');
+  const duplicate = await call(reviewer, 'eval_submit', { ...submission, requestId: 'another-review' });
+  assert.equal(duplicate.isError, true);
+  assert.equal(duplicate.structuredContent.data.code, 'EVAL_ALREADY_SUBMITTED');
+  const summary = data(await call(executor, 'run_summary', { runId: run.runId }));
+  assert.equal(summary.reviewState, 'reviewed');
+  assert.deepEqual(summary.review, review);
+  assert.equal(data(await call(executor, 'run_get', { runId: run.runId })).reviewState, 'reviewed');
+  assert.equal(data(await call(reviewer, 'eval_pending', {})).runs.some(item => item.runId === run.runId), false);
+});
+
+test('legacy unknown handoff with a later execution is not queued for review', async t => {
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const invoke = (name, args) => client.callTool({ name, arguments: args });
+  const run = (await invoke('run_begin', { requestId: 'legacy-begin', goal: 'Inspect', url: 'https://example.test/', criteria: [] })).structuredContent.data;
+  const finish = await invoke('run_finish', { runId: run.runId, requestId: 'legacy-finish', outcome: 'unknown', note: 'Unknown.' });
+  assert.notEqual(finish.isError, true, JSON.stringify(finish));
+  const later = (await invoke('browser_run', { runId: run.runId, requestId: 'legacy-later', purpose: 'observe', code: 'return { ok: true };' })).structuredContent.data;
+  await waitForExecution(client, run.runId, later.executionId);
+  const legacy = service.run(run.runId);
+  delete legacy.feedback.sequence;
+  service.store.put('run', run.runId, legacy);
+  assert.equal((await invoke('run_get', { runId: run.runId })).structuredContent.data.reviewState, 'not_ready');
+  const pending = (await invoke('eval_pending', {})).structuredContent.data;
+  assert.equal(pending.runs.some(item => item.runId === run.runId), false);
 });

@@ -71,6 +71,23 @@ class BrowserService {
     if (!run) throw problem('RUN_NOT_FOUND', 'Unknown runId');
     return run;
   }
+  reviewState(run) {
+    if (!run.feedback) return 'not_ready';
+    const current = run.feedback.sequence === undefined ? this.store.legacyHandoffIsCurrent(run) : run.feedback.sequence === run.sequence;
+    if (!current) return 'not_ready';
+    return run.reviewId ? 'reviewed' : 'pending';
+  }
+  criterionReadbacks(run) {
+    return run.criteria.map(criterion => {
+      const ref = run.feedback.verification.find(v => v.criterionId === criterion.id);
+      const observation = ref && this.store.get('observation', ref.observationId);
+      if (!observation || observation.runId !== run.runId) return { criterionId: criterion.id, found: false };
+      const { found, value } = valueAt(observation.value, criterion.path);
+      return { criterionId: criterion.id, observationId: observation.observationId, found,
+        afterLastWrite: observation.sequence > (run.lastWriteSequence || 0),
+        ...(found ? { actual: small(value), matchesExpected: isDeepStrictEqual(value, criterion.equals) } : {}) };
+    });
+  }
   request(tool, runId, args) {
     required(args.requestId, 'requestId');
     const key = `${tool}:${runId || ''}:${args.requestId}`;
@@ -174,6 +191,7 @@ class BrowserService {
       // Request deduplication above still returns an existing invocation unchanged.
       const programCheck = assertProgram(args.code);
       const executionId = this.id();
+      if (run.feedback) run.feedback.sequence ??= run.sequence;
       const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url).hostname);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
         sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
@@ -292,11 +310,12 @@ class BrowserService {
     } else executions = executions.slice(-(args.limit || 30));
     const records = this.store.query({ runId: run.runId, after: args.cursor || 0, limit: args.limit || 30 });
     const { finishArguments, ...publicRun } = run;
-    return { ...publicRun, executionCount, executions: executions.map(e => this.executionView(e)),
+    return { ...publicRun, reviewState: this.reviewState(run), executionCount, executions: executions.map(e => this.executionView(e)),
       ...records, records: records.records.map(r => ({ ...r, payload: small(r.payload) })), gaps: this.gaps(run.runId, args.executionId) };
   }
 
   async finish(args) {
+    args = { decision: 'no-change', note: 'Execution handoff', ...args };
     await this.refresh(args.runId);
     const run = this.store.transaction(() => {
       const request = this.request('run_finish', args.runId, args);
@@ -349,8 +368,10 @@ class BrowserService {
       if (['corrected', 'learned'].includes(args.decision) !== (updates.length > 0)) throw problem('INVALID_MEMORY', 'learned/corrected require updates; confirmed/no-change do not accept them');
       for (const update of updates) if (update.memoryId && !used.includes(update.memoryId)) throw problem('INVALID_MEMORY', 'Corrections must identify the used memory');
       const changedMemoryIds = this.memory.applyUpdates(run, updates, evidenceIds, args.outcome);
-      if (run.feedback) run.feedbackHistory = [...(run.feedbackHistory || []), run.feedback];
-      run.feedback = { requestId: args.requestId, outcome: args.outcome, decision: args.decision,
+      if (run.feedback) run.feedbackHistory = [...(run.feedbackHistory || []),
+        { ...run.feedback, ...(run.reviewId ? { reviewId: run.reviewId } : {}) }];
+      delete run.reviewId;
+      run.feedback = { requestId: args.requestId, sequence: run.sequence, outcome: args.outcome, decision: args.decision,
         verification, note: args.note, usedMemoryIds: used, recalledMemoryIds: recalled,
         changedMemoryIds, resolvedUnknownExecutions: args.outcome === 'succeeded' ? executions.filter(e => e.state === 'outcome_unknown').map(e => e.executionId) : [],
         submittedAt: this.now() };

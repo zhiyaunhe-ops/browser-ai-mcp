@@ -5,6 +5,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const { createService } = require('./service');
+const { registerEvaluationTools } = require('./evaluation');
 const { updateTemplateField } = require('./asp-template');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
 const packageInfo = require('../package.json');
@@ -13,7 +14,6 @@ const text = z.string().min(1);
 const idempotent = { runId: text, requestId: text };
 const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional() };
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
-const output = { data: z.unknown() };
 const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
 const workbenchRound = { ...idempotent, pageLabel: text.optional() };
 
@@ -24,10 +24,11 @@ function readWorkbench(service, businessTool, method, { runId, requestId, pageLa
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+    instructions: '执行模型负责操作、记录和独立回读，run_finish 自动交接。独立评估模型用 eval_pending、eval_packet、eval_submit 评估和总结，用 run_summary 取结果。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
-  const register = (name, description, inputSchema, method) => server.registerTool(name, {
-    description, inputSchema, outputSchema: output
+  const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
+    description, inputSchema, outputSchema: { data: resultSchema
+      ? z.union([resultSchema, z.object({ code: text, message: z.string() }).passthrough()]) : z.unknown() }
   }, async args => {
     try {
       const data = await method(args);
@@ -41,6 +42,7 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
+  registerEvaluationTools(register, service);
   register('asp_workbench_open_node', '在当前 ASP UAT 任务中按精确服务名打开工作台节点。从目录取得编码后请求服务详情并调用工作台原生导航，失败后走工作台搜索及点选。结果通过 run_get 读取，可在同一任务继续操作。', {
     ...workbenchRound, nodeName: text.describe('工作台中的精确服务名称，例如 UI模板。'),
     nodeCode: text.optional().describe('同名目录节点可用候选中的服务编码区分。')
@@ -81,12 +83,12 @@ function createMcpServer(service = createService()) {
   register('run_get', 'Read durable run and execution state without replaying commands. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
-  register('run_finish', 'Verify declared criteria against a later observation, atomically submit memory feedback, and finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
+  register('run_finish', 'Hand off the execution outcome and its observations for independent evaluation. Success requires a post-action readback. Omit decision and note for a routine handoff. Finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
     ...idempotent, outcome: z.enum(['succeeded', 'failed', 'unknown', 'cancelled']),
     verification: z.array(z.object({ criterionId: text, observationId: text })).default([]),
-    decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']),
+    decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']).optional(),
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),
-    note: text, keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
+    note: text.optional(), keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
   register('memory_search', 'Recall procedures for the observed URL and goal. Use sourceRunId with evidence_query to inspect requests recorded when a procedure was saved.', {
     url: z.string().url(), goal: z.string(), limit: z.number().int().min(1).max(10).optional()

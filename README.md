@@ -40,6 +40,42 @@ npm ci
 | 用后续观察核对结果并结束任务 | `run_finish` |
 | 召回流程，读取操作记录和版本 | `memory_search`、`memory_get` |
 | 查询已保存的执行证据，起草可复用流程 | `evidence_query`、`recipe_draft` |
+| 评估模型读取待办、核对证据并保存评估 | `eval_pending`、`eval_packet`、`eval_submit` |
+| 读取某次运行的评估进度、结论和总结 | `run_summary` |
+
+### 执行模型和评估模型交接
+
+执行模型负责操作页面和回读业务字段。`run_finish` 接受运行结果和验收引用，日常交接可以省略 `decision` 和 `note`。成功运行仍需提供最后一次执行之后的观察。MCP 自动将已交接的任务列为 `pending`，保存证据并完成原有的页面清理。
+
+外部调度方选择评估模型，让它连接同一份 MCP 数据库。评估模型按以下步骤完成交接。
+
+1. 调用 `eval_pending` 获取待评估的 `runId`，也可直接使用执行方交来的 `runId`。
+2. 调用 `eval_packet({runId})` 读取目标、验收条件、操作轮次、回读结果和采集缺口。`readbacks` 单独列出验收字段的实际值及观察是否晚于最后一次执行。翻页检查 `rounds` 时传回首页的 `reviewKey` 和上一页的 `nextCursor`，需要请求细节时用 `evidence_query`。
+3. 调用 `eval_submit`，逐条说明验收条件是否满足，并撰写结论、可复用经验和局限。引用证据包中的 `observationId` 或 `evidence_query` 返回的 `recordId`。判定条件满足时须引用操作后的回读。证据不足时用 `insufficient_evidence`。下面的示例以单号查询为目标，尖括号中的值取自实际运行。
+
+```json
+{
+  "runId": "<runId>",
+  "requestId": "review-1",
+  "reviewKey": "<reviewKey>",
+  "reviewerModel": "<承担评估的模型标识>",
+  "verdict": "pass",
+  "criterionResults": [{
+    "criterionId": "complete",
+    "verdict": "met",
+    "reason": "独立回读显示查询完整，候选数和实际匹配数都是 0。",
+    "evidenceIds": ["<observationId>"]
+  }],
+  "evidenceIds": [],
+  "summary": {
+    "result": "已核实该单号没有匹配记录。",
+    "lessons": ["将计数请求与返回行一起核对。"],
+    "limitations": ["此次查询只覆盖通用申请单。"]
+  }
+}
+```
+
+`run_summary({runId})` 返回执行方的 `executionOutcome`、评估进度 `reviewState` 以及评估报告 `review`。进度依次为 `not_ready`、`pending`、`reviewed`。同一提交重试沿用 `requestId`。结果未知的任务继续执行后，需要新一次交接；提交旧证据包会收到 `EVAL_STALE`。历史运行已有 `run_finish` 交接记录的也可进入评估。评估总结单独保存，写入长期流程记忆仍沿用已有的记忆更新接口。
 
 ### 记录请求与复用
 

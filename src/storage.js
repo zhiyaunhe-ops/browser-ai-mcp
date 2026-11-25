@@ -9,6 +9,9 @@ const plain = value => value !== null && typeof value === 'object' && !Array.isA
   [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const clone = value => JSON.parse(JSON.stringify(value));
 const fail = (code, message, fields = {}) => Object.assign(new Error(message), { code, ...fields });
+// Older unknown handoffs could be followed by another execution before upgrade.
+const laterIntent = `EXISTS (SELECT 1 FROM evidence i WHERE i.runId = e.runId AND i.cursor > e.cursor
+  AND i.kind = 'execution' AND json_extract(i.json, '$.payload.phase') = 'intent')`;
 const canonical = value => JSON.stringify(Array.isArray(value) ? value.map(item => JSON.parse(canonical(item))) :
   plain(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, JSON.parse(canonical(value[key]))])) : value);
 
@@ -187,6 +190,38 @@ class Store {
     const rows = this.db.prepare(`SELECT cursor, json FROM evidence WHERE ${filters.join(' AND ')} ORDER BY cursor LIMIT ?`).all(...values, limit + 1);
     const records = rows.slice(0, limit).map(row => ({ ...JSON.parse(row.json), cursor: Number(row.cursor) }));
     return { records, nextCursor: records.at(-1)?.cursor ?? after, hasMore: rows.length > limit };
+  }
+
+  evidenceById(recordId, runId) {
+    const row = this.db.prepare('SELECT json FROM evidence WHERE recordId = ? AND runId = ?').get(recordId, runId);
+    return row ? JSON.parse(row.json) : null;
+  }
+
+  legacyHandoffIsCurrent(run) {
+    if (run.feedback.outcome !== 'unknown') return true;
+    const row = this.db.prepare(`SELECT NOT ${laterIntent} AS current FROM evidence e
+      WHERE e.runId = ? AND e.kind = 'incident' AND json_extract(e.json, '$.payload.type') = 'run-feedback'
+        AND json_extract(e.json, '$.payload.requestId') = ?`).get(run.runId, run.feedback.requestId);
+    return Boolean(row?.current);
+  }
+
+  pendingReviews(after, limit) {
+    // The feedback event supplies a stable cursor even when another model reviews
+    // a run between pages, or an unknown outcome receives a newer handoff.
+    const rows = this.db.prepare(`SELECT e.cursor, r.json FROM evidence e
+      JOIN entities r ON r.kind = 'run' AND r.id = e.runId
+      WHERE e.cursor > ? AND e.kind = 'incident' AND json_extract(e.json, '$.payload.type') = 'run-feedback'
+        AND json_extract(e.json, '$.payload.requestId') = json_extract(r.json, '$.feedback.requestId')
+        AND coalesce(json_extract(r.json, '$.feedback.sequence'), json_extract(r.json, '$.sequence')) = json_extract(r.json, '$.sequence')
+        AND (json_extract(r.json, '$.feedback.sequence') IS NOT NULL OR json_extract(r.json, '$.feedback.outcome') != 'unknown'
+          OR NOT ${laterIntent})
+        AND json_extract(r.json, '$.reviewId') IS NULL
+      ORDER BY e.cursor LIMIT ?`).all(after, limit + 1);
+    const page = rows.slice(0, limit);
+    return { runs: page.map(row => {
+      const { runId, goal, outcome, feedback } = JSON.parse(row.json);
+      return { runId, goal, outcome, reviewKey: feedback.requestId };
+    }), nextCursor: Number(page.at(-1)?.cursor ?? after), hasMore: rows.length > limit };
   }
 
   importLegacy(directory) {
