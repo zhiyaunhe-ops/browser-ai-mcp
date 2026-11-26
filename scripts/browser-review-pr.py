@@ -274,11 +274,12 @@ def publish(day, state, repository, base, supplied_report=None, revision=None, b
             destination.write_bytes(content)
             command(git + ["add", "--", report_path])
             if repository == REPO:
-                index = Path(checkout) / "README.md"
-                link = f"- [浏览器 Eval · {day}]({report_path})"
+                index_path = "reviews/browser/README.md"
+                index = Path(checkout) / index_path
+                link = f"- [浏览器 Eval · {day}]({Path(report_path).name})"
                 if link not in index.read_text().splitlines():
                     index.write_text(index.read_text().rstrip() + "\n" + link + "\n")
-                    command(git + ["add", "--", "README.md"])
+                    command(git + ["add", "--", index_path])
             identity = subprocess.run(git + ["var", "GIT_COMMITTER_IDENT"], capture_output=True)
             commit_git = git
             if identity.returncode:
@@ -371,7 +372,7 @@ def publish_with_changes(day, state, repository, base, model, supplied=None, rev
     report = delivered / "review.md"
     if not report.exists():
         if repository == REPO:
-            summary += "\n\n## Related documents\n\n- [浏览器 Eval 工作流程](../../README.md)"
+            summary += "\n\n## Related documents\n\n- [浏览器 Eval 工作流程](../../references/browser-eval.md)"
         save(report, content.rstrip() + ("\n\n## 按评审意见修改\n\n" + summary + "\n").encode())
     branch = revision.get("branch") if revision else None
     if repository == REPO and changes.get("number"):
