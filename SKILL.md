@@ -15,7 +15,7 @@ When available, pass the original log path and session ID in `run_begin.sessionS
 
 If the original log path is absent or stale, actively search the client-specific roots in `eval_packet.sessionSearch`. Look for the session ID, then the run ID, task wording and time. Confirm the request and final reply in context before citing line numbers.
 
-On Oracle, run the daily cross-client Browser Eval with `python3 scripts/browser-review-pr.py run --day YYYY-MM-DD` (Hong Kong date). It opens a separate local review session and submits the resulting report as a GitHub pull request for approval. See the [daily review workflow](README.md).
+On Oracle, run the daily cross-client Browser Eval with `python3 scripts/browser-review-pr.py run --day YYYY-MM-DD` (Hong Kong date). It opens a separate local review session and submits the resulting report as a GitHub pull request for approval. See the [daily review workflow](references/browser-eval.md#oracle-每日浏览器操作评审).
 
 After review, submit reusable fixes, regression cases or documented lessons through a PR to the authorized repository. Include the problem ID, rationale, evidence locators and verification result, and return the PR URL. Keep full session logs local.
 
@@ -81,12 +81,14 @@ In a Codex `exec` wrapper, use `text({ browserOperation: { operation, runId, req
 ## Related documents
 
 - [Installation](install.md)
-- [Capabilities and MCP tools](README.md)
+- [Project overview](README.md)
+- [Browser and ASP tool contracts](references/browser-workflows.md)
+- [Eval and Toolkit workflows](references/browser-eval.md)
 ## Optional YonBuilder tools
 
 Configure `BROWSER_AI_YONBUILDER_ROOT` (local plugin installation) and `BROWSER_AI_YONBUILDER_WORKSPACE` (authenticated workspace) in the MCP host. The server invokes the installed CLI with Node. Each operator supplies their own CLI, workspace and credentials.
 
-Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
+Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Then use `yonbuilder_app_get` for the selected application’s details. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
 
 ## Versioned local procedures
 
