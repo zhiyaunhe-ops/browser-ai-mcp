@@ -24,7 +24,7 @@ def main():
         (directory / "pr.json").write_text(result.stdout)
         message = f"{day} 浏览器 Eval 已在 Oracle 独立评审。GitHub PR 状态为 {receipt['pullRequestState']}。\n{receipt['pullRequest']}"
         report = Path(receipt["report"]).read_text()
-        conclusion = next((line.strip() for line in report.splitlines()[1:]
+        conclusion = next((line.strip() for line in report.partition("## 结论")[2].splitlines()
                            if line.strip() and not line.startswith(("#", "|", "`"))), "")
         if conclusion:
             message += "\n" + conclusion[:400]

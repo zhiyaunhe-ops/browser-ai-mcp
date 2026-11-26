@@ -114,6 +114,15 @@ def review_brief(packet):
             if len(selected) == 3:
                 break
 
+    # Consecutive identical entries share a span; each row stays addressable by its packet position.
+    spans = []
+    for index, row in enumerate(packet["rows"], start=1):
+        fields = [row["source"], row["operation"], row["status"], bool(row.get("wrapperCallSiteOnly")),
+                  row.get("executionState"), bool(row.get("observationId")), row.get("errorCode")]
+        if spans and fields == spans[-1][2:]:
+            spans[-1][1] = index
+        else:
+            spans.append([index, index, *fields])
     recorder = packet.get("recorder", {})
     return {
         "day": packet["day"], "timeZone": packet["timeZone"], "observedUntil": packet.get("observedUntil"),
@@ -122,6 +131,9 @@ def review_brief(packet):
             item["state"] for item in recorder.get("executions", [])
         ))},
         "samples": samples,
+        "rowIndexColumns": ["first", "last", "source", "tool", "status", "callSiteOnly",
+                            "executionState", "hasObservationId", "errorCode"],
+        "rowIndex": spans if len(json.dumps(spans)) < 200000 else None,
     }
 
 
@@ -141,6 +153,7 @@ def review(day, state, model):
 下方证据摘要含全量统计和覆盖信息。topOperations 仅列每个来源出现次数最多的最多 12 种操作，
 samples 是每个来源、结果分层各最多 3 个不同操作的定向样本，优先直接业务操作和带观测轨迹的记录。
 样本的 row 是全量证据包 rows 的位置，从 1 起算，全量包位于本机 {evidence}，需要时可二次读取。
+rowIndex 有值时按连续行号列出每条记录的工具、返回状态和回读标志，可直接逐项核对。
 样本不能用于估计总体占比。录制器执行和会话工具调用口径分别保留。
 先核对采集来源、记录及缺口，再根据用户目标、操作结果和后续回读判定结果。
 区分已验证、存在偏差、证据不足。执行者自己的成功声明不能替代对业务结果的回读。
