@@ -553,6 +553,11 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
     evidenceIds: [observation.observationId], summary: { result: 'Customer verified.' },
     memory: { problem_id: 'customer-lookup', context: 'Customer search', rationale: 'Verify lookup',
       prediction: 'Customer can be found', metric: 'Lookup success', evidence: 'Customer observation' } };
+  submission.toolChoice = { status: 'improvable', reason: 'The first lookup already returned the customer.',
+    alternative: 'Use the first lookup result for verification.', evidenceIds: [observation.observationId] };
+  const invalidRoute = await call(reviewer, 'eval_submit', { ...submission, requestId: 'foreign-route',
+    toolChoice: { ...submission.toolChoice, evidenceIds: [foreign.observationId] } });
+  assert.equal(invalidRoute.structuredContent.data.code, 'EVAL_EVIDENCE');
   const wrongEvidence = await call(reviewer, 'eval_submit', { ...submission, requestId: 'foreign',
     evidenceIds: [foreign.observationId], criterionResults: [{ ...submission.criterionResults[0], evidenceIds: [foreign.observationId] }] });
   assert.equal(wrongEvidence.isError, true);
@@ -577,9 +582,12 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const summary = data(await call(executor, 'run_summary', { runId: run.runId }));
   assert.equal(summary.reviewState, 'reviewed');
   assert.deepEqual(summary.review, review);
+  assert.equal(review.verdict, 'pass');
+  assert.deepEqual(review.toolChoice, submission.toolChoice);
   const history = data(await call(reviewer, 'review_history', { problem_id: 'customer-lookup' }));
   const attempt = history.problems[0].attempts.find(item => item.attempt_id === review.reviewId);
   assert.equal(attempt.source, 'browser');
+  assert.deepEqual(attempt.assessment.toolChoice, submission.toolChoice);
   assert.equal(attempt.memory.prediction, 'Customer can be found');
   assert.deepEqual(attempt.observations, []);
   assert.equal(data(await call(executor, 'run_get', { runId: run.runId })).reviewState, 'reviewed');

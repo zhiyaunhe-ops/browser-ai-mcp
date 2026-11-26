@@ -166,6 +166,15 @@ def normalize_assessment(criteria, assessment):
             "limitations": [note.strip() for note in text_list(summary, "limitations", 30, optional=True)],
         },
     }
+    if "toolChoice" in assessment:
+        route = assessment["toolChoice"]
+        if not isinstance(route, dict) or route.get("status") not in ("reasonable", "improvable", "insufficient_evidence"):
+            raise EvaluationError("EVAL_TOOL_CHOICE", "Invalid tool choice status.")
+        choice = {"status": route["status"], "reason": required_text(route, "reason"),
+                  "evidenceIds": list(dict.fromkeys(text_list(route, "evidenceIds", 100)))}
+        if route["status"] == "improvable" or "alternative" in route:
+            choice["alternative"] = required_text(route, "alternative")
+        normalized["toolChoice"] = choice
     if "memory" in assessment:
         normalized["memory"] = normalize_memory(assessment["memory"])
     memory_tag = normalized.get("memory", {}).get("domain_tag")
