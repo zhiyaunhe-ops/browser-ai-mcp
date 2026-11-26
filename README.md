@@ -140,6 +140,28 @@ npm ci
 3. 评估 AI 提交新运行的 `eval_submit`。同一版本满足验收条件并有对应回读后，该项进入 `verified`。失败或证据不足会留下尝试记录，状态保留为 `applied`；修订交付物时传当前 `expectedVersion`，再按新版本复验。
 4. 通过 PR 交付可复用改动，附上问题编号、版本和复验运行。后续多个真实案例的效果，可继续用 `review_observe` 跟踪。
 
+### Oracle 每日浏览器操作评审
+
+在 Oracle 上使用有权读取浏览器操作记录的账号运行。需要 Python 3、Node.js、本机已登录的 Codex CLI，以及有目标仓库写权限的 GitHub CLI。Oracle 定时入口 `scripts/browser-review-daily.py` 在香港时间 09:00 和 21:00 处理上一完整日，晚间沿用当日 PR 或补交缺报。它通过本机 `yonclaw-result` 发送普通结果通知。每日窗口按香港日历计算，可用 `TZ=Asia/Hong_Kong date -d yesterday +%F` 取得前一天。
+
+```sh
+python3 scripts/browser-review-pr.py run --day 2026-11-25
+```
+
+`run` 采集该日期的操作，开启一个新的只读 Codex 会话独立评审，并把 Markdown 报告提交到私有仓库 `zhiyaunhe-ops/browser-ai-memory` 的 `main` 等待 GitHub PR 审批。Codex 通过标准输入接收全量计数、覆盖范围与分层样本，可按需读取本地证据包核对细节。独立评审返回完整的结构化结果后才会发布。每天使用 `browser-review/YYYY-MM-DD` 分支，提交 `reviews/browser/YYYY-MM-DD.md`。发布始终从目标分支临时检出，因此运行中的脚本可以来自本地工作树。采集原文和 Codex 日志保留在 Oracle，报告 PR 等待人工审批和合并。
+
+```sh
+python3 scripts/browser-review-pr.py collect --day 2026-11-25
+python3 scripts/browser-review-pr.py review --day 2026-11-25
+python3 scripts/browser-review-pr.py publish --day 2026-11-25
+```
+
+`collect` 返回本地证据包路径，`review` 返回本地报告路径，`publish` 返回 PR 链接、状态和提交号。已经由另一个独立会话准备好报告时，可直接执行 `publish --day 2026-11-25 --report /absolute/path/to/review.md`。报告应为 UTF-8 Markdown，以一级标题开头，只写归纳结论和非敏感证据定位。
+
+默认状态目录为 `~/.local/state/browser-ai-mcp/reviews/YYYY-MM-DD`，设置 `XDG_STATE_HOME` 或传入 `--state-dir` 可改变存放位置。同一天重跑会沿用已保存的证据和报告。推送后创建 PR 失败时，用相同日期重跑 `publish` 即可继续。已有同日 PR 时返回它的状态和链接。现存远端报告与本地文件不一致时，脚本保留本地报告并报告冲突。
+
+采集来源补齐后，可用 `python3 scripts/browser-review-pr.py refresh --day 2026-11-25` 对同日重新采集和独立评审。刷新仅适用于已有开放 PR。旧证据和报告保留在本机，新报告以快进提交更新同一条 PR，随后回读 PR 提交和报告。刷新中断时，重跑相同命令会继续待完成的修订。刷新成功后，日常命令沿用最新核实的修订。
+
 ### 记录请求与复用
 
 每个浏览器执行轮次自动收集所操作页面的 XHR 和 Fetch 请求。用 `run_get` 查看本轮的 `networkCapture`。用 `evidence_query` 传入同一个 `runId`、`executionId` 和 `view: "api"` 可看方法、路径、查询参数名、请求体结构及响应状态。草稿的 `requestEvidence` 带回请求样本和证据 ID。样本超过 30 条时，用原任务的 `evidence_query` 翻页读取其余记录。下次任务命中这条流程记忆或页面提醒时，可以用返回的 `sourceRunId` 查回当时的请求。

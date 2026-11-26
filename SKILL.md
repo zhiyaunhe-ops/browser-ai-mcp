@@ -15,6 +15,8 @@ When available, pass the original log path and session ID in `run_begin.sessionS
 
 If the original log path is absent or stale, actively search the client-specific roots in `eval_packet.sessionSearch`. Look for the session ID, then the run ID, task wording and time. Confirm the request and final reply in context before citing line numbers.
 
+On Oracle, run the daily cross-client Browser Eval with `python3 scripts/browser-review-pr.py run --day YYYY-MM-DD` (Hong Kong date). It opens a separate local review session and submits the resulting report as a GitHub pull request for approval. See the [daily review workflow](README.md).
+
 After review, submit reusable fixes, regression cases or documented lessons through a PR to the authorized repository. Include the problem ID, rationale, evidence locators and verification result, and return the PR URL. Keep full session logs local.
 
 Follow the same `problem_id` in `review_history`. Use `review_observe` for later measurements with the actual deployed version and evidence locator.
