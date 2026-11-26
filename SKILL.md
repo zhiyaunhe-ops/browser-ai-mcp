@@ -88,6 +88,12 @@ Configure `BROWSER_AI_YONBUILDER_ROOT` (local plugin installation) and `BROWSER_
 
 Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
 
+## Versioned local procedures
+
+Set `BROWSER_AI_PROCEDURES_DIR` to an operator-controlled directory of procedure folders. Each folder has a `SKILL.md` with JSON front matter between `---` lines, containing `id`, `version`, `description`, `nodes`, `goalTerms`, `entry`, and optionally `productVersion`, `node` and `flow`. The entry exports an async `probe({ task, page, input })`. The public checkout ships without deployment-specific procedure packages.
+
+Read `scriptCache` in `run_begin` or `run_get`. For a match, pass `invoke.script` to `browser_run` with `purpose: "execute"`. An old or missing briefing returns before dispatch. To use custom code for a matched task, pass its current `scriptBriefingId`. Read back results independently and finish the run for Eval. The Yonyou page reader also supports explicit split-button menus through `ys.openSplitMenu`.
+
 ## YonCode host setup
 
 Register the root Node entry point `src/mcp.js` in the project's local MCP settings. Set `BROWSER_AI_EGO_BIN` to the installed ego lite executable. Supply the plugin root and authenticated workspace through the two YonBuilder variables described above. Keep machine paths and login data in the local host configuration.

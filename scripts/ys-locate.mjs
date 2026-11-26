@@ -15,9 +15,11 @@
 // （document.querySelectorAll 的动作集合、aria/title/placeholder/name/data-title/value/label 候选、
 //   可见性 2px 与 opacity 0.05、命中后 scrollIntoView 居中），见 references/yonwork-harness.md。
 
-import { BUSY } from './ys-page.mjs';
+const pageModuleUrl = new URL('./ys-page.mjs', import.meta.url);
+pageModuleUrl.search = new URL(import.meta.url).search;
+const { BUSY, SPLIT_BUTTON } = await import(pageModuleUrl);
 
-export const VERSION = "2026-11-18.4";
+export const VERSION = "2026-11-19.2";
 
 // 精确名才算「强匹配」：前缀/包含/同义词都算模糊，click 默认拒绝。
 export const STRONG = 1;
@@ -161,12 +163,16 @@ export async function inspect(page, opts = {}) {
   if (opts.scanLimit !== undefined && (!Number.isInteger(opts.scanLimit) || opts.scanLimit < 1)) throw new TypeError('scanLimit must be a positive integer');
   if (opts.framePath !== undefined && (typeof opts.framePath !== 'string' || !/^0(?:\/\d+)*$/.test(opts.framePath))) throw new TypeError('framePath must be an observed path such as 0/1');
   if (opts.rowText !== undefined && (typeof opts.rowText !== 'string' || !opts.rowText.trim())) throw new TypeError('rowText must be a nonempty cell label');
+  if (opts.part !== undefined && !['primary', 'menu', 'menuitem'].includes(opts.part)) throw new TypeError('part must be primary, menu or menuitem');
+  if (opts.buttonCode !== undefined && (typeof opts.buttonCode !== 'string' || !opts.buttonCode.trim())) throw new TypeError('buttonCode must be an observed button code');
   const cap = Math.max(1, Math.min(10000, Math.floor(opts.scanLimit || 900)));
-  const observed = await page.evaluate(([specific, generic, limit, scope, maxW, maxH, maxText, fieldid, targetFrame, inline, cellSelector, rowText, rowActionSelector, busySelector]) => {
+  const observed = await page.evaluate(([specific, generic, limit, scope, maxW, maxH, maxText, fieldid, targetFrame, inline, cellSelector, rowText, rowActionSelector, busySelector, split, part, buttonCode, popupOnly]) => {
     const out = [];
     const seen = new Set();
     const hitIds = new WeakMap();
     const unreadFrames = [], modeActions = [];
+    const activeMenus = new Set();
+    let frameUrl = '';
     let nextHitId = 1, documents = 0, selectedDocuments = 0, scopeMatches = 0, limitReached = false, busy = false;
     const specificSelector = specific.join(',');
     const genericSelector = generic.join(',');
@@ -194,6 +200,11 @@ export async function inspect(page, opts = {}) {
       if (Number.isFinite(opacity) && opacity < 0.05) return null;
       return r;
     };
+    const fieldOf = el => el.getAttribute('fieldid') || el.getAttribute('data-fieldid') || '';
+    const disabled = el => el.matches(':disabled') || Boolean(el.closest('[aria-disabled="true"],[inert]'));
+    const menuVisible = (el, view) => !el.closest('[hidden],[aria-hidden="true"]') &&
+      (el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ?? true) &&
+      Boolean(visible(el, view));
     const labelText = (el, doc) => {
       const parts = [];
       const wrapped = el.closest("label");
@@ -214,12 +225,47 @@ export async function inspect(page, opts = {}) {
       let roots = [];
       if (selected) {
         selectedDocuments++;
+        if (targetFrame) frameUrl = doc.URL;
         try { roots = scope ? [...doc.querySelectorAll(scope)] : [doc]; }
         catch { unreadFrames.push({ framePath, reason: 'invalid-scope' }); }
         scopeMatches += roots.length;
         busy ||= roots.some(root => (root.matches?.(busySelector) && visible(root, doc.defaultView))
           || [...root.querySelectorAll(busySelector)].some(el => el.matches(busySelector) && visible(el, doc.defaultView)));
       }
+      const view = doc.defaultView;
+      if (part === 'menuitem' && popupOnly) {
+        for (const root of roots) {
+          const popups = [...root.querySelectorAll(split.popup)];
+          if (root.matches?.(split.popup)) popups.push(root);
+          for (const popup of popups) if (menuVisible(popup, view)) activeMenus.add(popup);
+        }
+      }
+      const splitGroups = new WeakMap();
+      const splitOf = el => {
+        if (!el.matches(split.primaryCopy + ',' + split.menu)) return null;
+        const group = el.closest(split.group);
+        if (!group) return null;
+        if (!splitGroups.has(group)) {
+          const own = selector => [...group.querySelectorAll(selector)]
+            .filter(node => node.closest(split.group) === group && visible(node, view));
+          const main = own(split.primary), arrows = own(split.menu);
+          const primary = main[0], menu = arrows[0];
+          const name = primary ? tidy(primary.getAttribute('aria-label') || primary.innerText || primary.textContent) : '';
+          splitGroups.set(group, main.length === 1 && arrows.length === 1 && name
+            ? { group, primary, menu, name, buttonCode: primary.getAttribute('btn-code') || '',
+              fieldid: fieldOf(primary) || fieldOf(group) } : null);
+        }
+        const control = splitGroups.get(group);
+        if (!control) return null;
+        const { primary, menu, name, buttonCode, fieldid } = control;
+        if (el === menu) return { part: 'menu', name, buttonCode, fieldid, expanded: el.getAttribute('aria-expanded') };
+        // WUI can render a second main button at exactly the same hit point.
+        // Only matching copies belong to the logical main action.
+        const label = tidy(el.getAttribute('aria-label') || el.innerText || el.textContent);
+        if (el === primary || label === name && (el.getAttribute('btn-code') || '') === buttonCode)
+          return { part: 'primary', name, buttonCode, fieldid };
+        return null;
+      };
       const pick = (selector, isGeneric) => {
         let nodes;
         try {
@@ -230,8 +276,16 @@ export async function inspect(page, opts = {}) {
         for (const el of nodes) {
           if (seen.has(el)) continue;
           seen.add(el);
-          const actualFieldid = el.getAttribute('fieldid') || el.getAttribute('data-fieldid') || '';
+          const splitButton = part === 'menuitem' ? null : splitOf(el);
+          if (part && part !== 'menuitem' && splitButton?.part !== part) continue;
+          if (buttonCode && (splitButton?.buttonCode || el.getAttribute('btn-code')) !== buttonCode) continue;
+          const actualFieldid = fieldOf(el) || splitButton?.fieldid || '';
           if (fieldid && actualFieldid !== fieldid && !actualFieldid.endsWith('|' + fieldid)) continue;
+          if (part === 'menuitem') {
+            const menuRoot = el.closest(split.popup) || (!popupOnly && el.closest('[role="menu"]'));
+            if (!menuRoot || !menuVisible(menuRoot, view) || !menuVisible(el, view)) continue;
+            activeMenus.add(menuRoot);
+          }
           const rowNode = el.closest(rowSelector);
           if (!rowNode && modeActions.length < 8) {
             const code = el.getAttribute('btn-code') || '';
@@ -313,7 +367,9 @@ export async function inspect(page, opts = {}) {
             fieldid: actualFieldid,
             role: (el.getAttribute("role") || "").toLowerCase(),
             cls: String(el.className || "").slice(0, 120),
-            disabled: el.matches(":disabled") || !!el.closest('[aria-disabled="true"], [inert]'),
+            disabled: disabled(el) || ((splitButton || part === 'menuitem') &&
+              /(?:^|[\s-])disabled(?:$|[\s-])/.test(String(el.className))),
+            ...(splitButton ? { splitButton } : {}),
             frame: depth,
             framePath, hitKey,
             rowText: row?.text || '',
@@ -325,7 +381,10 @@ export async function inspect(page, opts = {}) {
           });
         }
       };
-      if (fieldid) pick('[fieldid],[data-fieldid]', false);
+      if (part === 'menuitem') pick(split.item, false);
+      else if (part === 'menu') pick(split.menu, false);
+      else if (part === 'primary') pick(split.primaryCopy, false);
+      else if (fieldid) pick('[fieldid],[data-fieldid],' + split.primaryCopy, false);
       else pick([...specific, ...generic, ...inline].join(','), true);
       let frameIndex = 0;
       for (const frame of doc.querySelectorAll("iframe")) {
@@ -351,14 +410,23 @@ export async function inspect(page, opts = {}) {
       }
     };
     walk(document, 0, 0, 0, { left: 0, top: 0, right: innerWidth, bottom: innerHeight }, [], '0');
+    let popupId;
+    if (popupOnly && activeMenus.size === 1) {
+      const [popup] = activeMenus;
+      const ids = popup.ownerDocument[Symbol.for('browser-ai.popup-ids')] ||= new WeakMap();
+      if (!ids.has(popup)) ids.set(popup, Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-'));
+      popupId = ids.get(popup);
+    }
     return { url: document.URL || '', items: out, scannedTotal: out.length, limitReached, elementLimit: limit,
       documents, selectedDocuments, scopeMatches, unreadFrames, busy, modeActions,
+      ...(part === 'menuitem' ? { activeMenus: activeMenus.size, frameUrl, popupId } : {}),
       complete: !limitReached && unreadFrames.length === 0 && selectedDocuments > 0 && scopeMatches > 0,
       coverage: 'same-origin-light-dom', shadowDOM: 'not-traversed' };
   }, [SPECIFIC_SELECTORS, GENERIC_SELECTORS, cap, opts.scope || null,
       GENERIC_MAX_W, GENERIC_MAX_H, GENERIC_MAX_TEXT,
       opts.fieldid ? String(opts.fieldid).replace(/^\||\|$/g, '') : null, opts.framePath || null,
-      INLINE_LINKS, CELL, opts.rowText ? opts.rowText.replace(/\s+/g, ' ').trim() : null, ROW_ACTION, BUSY]);
+      INLINE_LINKS, CELL, opts.rowText ? opts.rowText.replace(/\s+/g, ' ').trim() : null, ROW_ACTION, BUSY,
+      SPLIT_BUTTON, opts.part || null, opts.buttonCode?.trim() || null, opts.popupOnly === true]);
   // Older Page adapters returned only an array, which cannot prove completeness.
   if (Array.isArray(observed)) return { items: observed, scannedTotal: observed.length,
     limitReached: observed.length >= cap, elementLimit: cap, unreadFrames: [],
@@ -390,6 +458,7 @@ function dedupeSameHit(items) {
     }
     const twin = out[index];
     const better = it.score > twin.score || (it.score === twin.score && (
+      Boolean(it.splitButton) !== Boolean(twin.splitButton) ? Boolean(it.splitButton) :
       (!twin.fieldid && it.fieldid)
       || (Boolean(twin.fieldid) === Boolean(it.fieldid) && (it.w || 0) * (it.h || 0) > (twin.w || 0) * (twin.h || 0))));
     if (better) out[index] = it;
@@ -492,29 +561,50 @@ export async function entries(page, opts = {}) {
 export async function find(page, query, opts = {}) {
   const observation = await inspect(page, opts);
   const all = observation.items;
+  const strictPart = Boolean(opts.part);
+  const partScore = item => opts.part === 'menu'
+    ? score(query, { text: item.splitButton?.name })
+    : score(query, item);
   const min = opts.min === undefined ? 0.55 : opts.min;
-  const ranked = dedupeSameHit(all
-    .filter(item => !item.disabled && (!opts.fieldid || matchesFieldid(item.fieldid || "", opts.fieldid)))
-    .map(item => ({ ...item, score: opts.fieldid ? 1 : Math.round(score(query, item) * 100) / 100 }))
+  const candidates = all.filter(item => (opts.part === 'menu' || item.splitButton?.part !== 'menu')
+    && (!opts.fieldid || matchesFieldid(item.fieldid || "", opts.fieldid)));
+  const ranked = dedupeSameHit(candidates
+    .filter(item => !item.disabled)
+    .map(item => ({ ...item, score: opts.fieldid && !strictPart ? 1 : Math.round(partScore(item) * 100) / 100 }))
     .filter(item => item.score >= Math.min(min, 0.2))
     .sort((a, b) => b.score - a.score || Number(b.inView) - Number(a.inView) || a.frame - b.frame));
   const eligible = ranked.filter(item => item.score >= min);
   const best = eligible[0] || null;
   const second = eligible[1];
-  const ambiguous = Boolean(best && second && second.score >= best.score - 0.02);
+  // A disabled exact duplicate is still evidence of more than one possible
+  // target. Callers can narrow the frame, scope or observed button code.
+  const exactParts = strictPart ? dedupeSameHit(candidates.filter(item => partScore(item) === STRONG)
+    .map(item => ({ ...item, score: STRONG }))) : [];
+  const ambiguous = exactParts.length > 1 || Boolean(best && second && second.score >= best.score - 0.02);
   const strong = Boolean(best && best.score >= STRONG);
   const truncated = observation.limitReached;
-  const incomplete = !observation.complete;
-  const loading = observation.busy && !strong;
-  const reason = truncated ? "scan-limit" : incomplete ? "incomplete" : loading ? "loading" : !best ? "no-match" : ambiguous ? "ambiguous" : strong ? "ok" : "fuzzy";
+  const popupChanged = opts.popupId !== undefined && opts.popupId !== observation.popupId;
+  const incomplete = popupChanged || !observation.complete || (strictPart && observation.coverage === 'legacy-array')
+    || (opts.part === 'menuitem' && !Number.isInteger(observation.activeMenus));
+  const loading = observation.busy && (strictPart || !strong);
+  const ambiguousMenu = opts.part === 'menuitem' && observation.activeMenus > 1;
+  const reason = popupChanged ? "popup-changed" : truncated ? "scan-limit" : incomplete ? "incomplete" : loading ? "loading" :
+    ambiguousMenu ? "ambiguous-menu" : !best ? "no-match" : ambiguous ? "ambiguous" : strong ? "ok" : "fuzzy";
+  const splitButtons = all.filter(item => item.splitButton?.part === 'menu').slice(0, 8)
+    .map(item => ({ name: item.splitButton.name, buttonCode: item.splitButton.buttonCode,
+      fieldid: item.splitButton.fieldid, framePath: item.framePath, disabled: item.disabled }));
   return {
-    ok: Boolean(best) && !incomplete && !loading, reason, strong, best,
+    ok: Boolean(best) && !incomplete && !loading && !ambiguousMenu, reason, strong, best,
     candidates: ranked.slice(0, Math.max(2, opts.limit || 8)),
+    ...(opts.part === 'menuitem' ? { activeMenus: observation.activeMenus, frameUrl: observation.frameUrl, popupId: observation.popupId } : {}),
     ...(reason !== 'ok' ? { entryPoints: entryList(observation, 8).entries, modeActions: observation.modeActions || [], searchScope: 'current-view',
+      ...(splitButtons.length ? { splitButtons } : {}),
       next: loading ? 'Wait for the requested data to load, then read the same view again.'
+        : ambiguousMenu ? 'More than one menu is visible. Inspect the current popup and scope the lookup to it.'
+        : splitButtons.length ? 'Inspect the relevant split button and open its menu explicitly with part:"menu". Then read the visible menu items.'
         : observation.modeActions?.length && opts.rowText ? 'An Edit toolbar action is visible. To inspect editing-mode row actions, enter Edit, then reveal and read the same row again.'
         : 'Check the actual grid position, reveal the row, and inspect its entries or More menu. Read after each change; use a native snapshot then a screenshot if needed.' } : {}),
-    scanned: all.length, truncated, complete: observation.complete && !loading,
+    scanned: all.length, truncated, complete: !incomplete && !loading,
     coverage: { mode: observation.coverage, documents: observation.documents,
       unreadFrames: observation.unreadFrames, scopeMatches: observation.scopeMatches },
     inView: all.filter(item => item.inView).length,
@@ -566,7 +656,9 @@ export async function click(page, query, opts = {}) {
   let found = await find(page, query, searchOpts);
   if (!found.complete) return { ...found, clicked: false };
   let best = found.best;
-  if (found.reason === 'ambiguous' && opts.allowAmbiguous !== true) return { ...found, clicked: false };
+  const refuse = result => result.reason === 'ambiguous-menu' ||
+    result.reason === 'ambiguous' && (opts.part || opts.allowAmbiguous !== true);
+  if (refuse(found)) return { ...found, clicked: false };
   if (best && !best.inView && opts.reveal !== false) {
     found = await reveal(page, best, searchOpts);
     best = found.best;
@@ -578,15 +670,14 @@ export async function click(page, query, opts = {}) {
   if (!best.inView) {
     return { clicked: false, reason: "offscreen", best, candidates: found.candidates, scanned: found.scanned };
   }
-  if (found.reason === "ambiguous" && opts.allowAmbiguous !== true) {
-    return { clicked: false, reason: "ambiguous", best, candidates: found.candidates };
-  }
+  if (refuse(found)) return { ...found, clicked: false };
   // 模糊猜测（名字只是包含关系或同义词）默认不点：宁可回清单让调用方确认
   const exact = best.score >= STRONG;
-  if (!exact && opts.fuzzy !== true) {
+  if (!exact && (opts.part || opts.fuzzy !== true)) {
     return { clicked: false, reason: "fuzzy", best, candidates: found.candidates, scanned: found.scanned };
   }
-  const what = best.aria || best.title || best.text || best.dataTitle || best.fieldid || best.cls;
+  const what = opts.part === 'menu' ? `${best.splitButton.name} ▼` :
+    best.aria || best.title || best.text || best.dataTitle || best.fieldid || best.cls;
   await page.mouse.click(best.x, best.y, {
     label: `${label} · ${what}${best.fieldid ? ` [${best.fieldid.split("|").pop()}]` : ""}${best.frame ? ` iframe${best.frame}` : ""}`,
   });
@@ -594,6 +685,35 @@ export async function click(page, query, opts = {}) {
     clicked: true, via: "coords", matchedBy: opts.fieldid ? "fieldid" : exact ? "name" : "fuzzy",
     tag: best.tag, best, label,
   };
+}
+
+/** Open only the arrow and check the expected item against the newly visible WUI popup. */
+export async function openSplitMenu(page, name, item, opts = {}) {
+  if (typeof item !== 'string' || !item.trim()) throw new TypeError('item must name the expected menu action');
+  const { framePath, buttonCode, fieldid, scope } = opts;
+  const arrow = { part: 'menu', framePath, buttonCode, fieldid, scope, reveal: false };
+  const trigger = await find(page, name, arrow);
+  if (trigger.reason !== 'ok') return { ok: false, triggerClicked: false, reason: trigger.reason };
+  if (trigger.best.splitButton.expanded === 'true') return { ok: false, triggerClicked: false, reason: 'menu-already-visible' };
+  arrow.framePath = trigger.best.framePath;
+  const menu = { part: 'menuitem', framePath: arrow.framePath, popupOnly: true };
+  const before = await inspect(page, menu);
+  if (!before.complete || before.busy || !before.frameUrl || !Number.isInteger(before.activeMenus))
+    return { ok: false, triggerClicked: false, reason: before.busy ? 'loading' : 'incomplete' };
+  if (before.activeMenus) return { ok: false, triggerClicked: false, reason: 'menu-already-visible' };
+  const opened = await click(page, name, arrow);
+  if (!opened.clicked) return { ok: false, triggerClicked: false, reason: opened.reason };
+  const deadline = Date.now() + 1500;
+  while (true) {
+    const result = await find(page, item, menu);
+    if (result.frameUrl !== before.frameUrl) return { ok: false, triggerClicked: true, reason: 'frame-changed' };
+    if (result.reason === 'ok' && result.activeMenus === 1 && result.popupId && result.best.inView)
+      return { ok: true, triggerClicked: true, item: result.best, menu: { ...menu, popupId: result.popupId } };
+    if (!['no-match', 'loading'].includes(result.reason) || Date.now() >= deadline)
+      return { ok: false, triggerClicked: true, reason: result.reason === 'ok' ? 'offscreen' : result.reason,
+        activeMenus: result.activeMenus };
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
 }
 
 /** 等待可点击的确定候选；本函数不点击。 */
@@ -604,8 +724,8 @@ export async function waitFor(page, query, opts = {}) {
   let last = null;
   while (Date.now() < until) {
     last = await find(page, query, opts);
-    if (last.ok && (last.reason !== "ambiguous" || opts.allowAmbiguous === true)
-      && (last.strong || opts.fuzzy === true)) return { ...last, waited: timeout - (until - Date.now()) };
+    if (last.ok && (last.reason !== "ambiguous" || !opts.part && opts.allowAmbiguous === true)
+      && (last.strong || !opts.part && opts.fuzzy === true)) return { ...last, waited: timeout - (until - Date.now()) };
     await new Promise(resolve => setTimeout(resolve, step));
   }
   return { ...last, ok: false, timedOut: true };
@@ -615,6 +735,7 @@ export async function waitFor(page, query, opts = {}) {
 export function attach(page) {
   const api = {
     click: (query, opts) => click(page, query, opts),
+    openSplitMenu: (name, item, opts) => openSplitMenu(page, name, item, opts),
     find: (query, opts) => find(page, query, opts),
     list: (query, opts) => list(page, query, opts),
     waitFor: (query, opts) => waitFor(page, query, opts),
@@ -628,4 +749,4 @@ export function attach(page) {
   return api;
 }
 
-export default { VERSION, norm, dice, score, inspect, collect, entries, find, list, click, waitFor, attach };
+export default { VERSION, norm, dice, score, inspect, collect, entries, find, list, click, openSplitMenu, waitFor, attach };

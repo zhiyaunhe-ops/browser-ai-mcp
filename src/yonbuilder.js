@@ -57,12 +57,35 @@ function registerYonbuilder(register, service, invoke = cli) {
     return invoke('bip-cli', [...argv, '--format', 'json', '--session-id', selected.sessionId]);
   }
 
+  function compactApp(item) {
+    return { id: item.id, appCode: item.appCode, appName: item.appName || item.name || '',
+      domainCode: item.domainCode || '', appDomain: item.appDomain || item.serviceDomainCode || '',
+      appType: item.appType || '', appStatus: item.appStatus };
+  }
+
+  async function listApps(selected, flags) {
+    const result = await query(selected, 'app', 'list', flags);
+    const data = result.data ?? result;
+    const apps = (data.apps ?? []).map(compactApp);
+    return { apps, count: apps.length, pagination: data.pagination ?? (data.totalElements === undefined ? undefined : {
+      page: data.pageIndex, size: data.pageSize, total: data.totalElements, totalPages: data.totalPages
+    }) };
+  }
+
   async function app(a, selected) {
     if (!a.appId && !a.appCode) fail('INVALID_ARGUMENT', 'Supply appId or appCode.');
-    const result = await query(selected, 'app', 'get', a.appId ? { id: a.appId } : { appcode: a.appCode });
-    const item = result.app?.data?.info ?? result.data?.info ?? result.app ?? result.data ?? result;
-    if (!item.id && !item.appCode) fail('APP_NOT_FOUND', 'Application lookup returned no identity.');
-    return { ...item, appDomain: item.appDomain || item.serviceDomainCode };
+    let item;
+    try {
+      const result = await query(selected, 'app', 'get', a.appId ? { id: a.appId } : { appcode: a.appCode });
+      item = result.app?.data?.info ?? result.data?.info ?? result.app ?? result.data ?? result;
+    } catch (error) {
+      if (a.appId) throw error;
+    }
+    if (!a.appId && item?.appCode !== a.appCode) {
+      item = (await listApps(selected, { full: true })).apps.find(candidate => candidate.appCode === a.appCode);
+    }
+    if (!item?.id) fail('APP_NOT_FOUND', 'Application lookup returned no identity.');
+    return compactApp(item);
   }
 
   async function pages(a, selected) {
@@ -72,8 +95,8 @@ function registerYonbuilder(register, service, invoke = cli) {
     const rows = (r.data?.pages ?? r.pages ?? []).flatMap(g =>
       Array.isArray(g.voucherPages) ? g.voucherPages.map(p => ({ groupName: g.groupName, ...p })) : [g]);
     const link = value => value ? new URL(value, endpoint(selected.baseUrl) + '/').href : '';
-    return rows.map(p => ({ name: p.name, groupName: p.groupName, pageCode: p.pageCode || p.designerCode || p.id,
-      designerCode: p.designerCode || p.pageCode, previewUrl: link(p.previewUrl), designerUrl: link(p.designerUrl || p.url) }));
+    return rows.map(p => ({ name: p.name, groupName: p.groupName, tplType: p.tplType || p.type || '', pageCode: p.pageCode || p.designerCode || p.id,
+      designerCode: p.designerCode || p.pageCode || p.id, previewUrl: link(p.previewUrl), designerUrl: link(p.designerUrl || p.url) }));
   }
 
   async function inspect(a, url) {
@@ -89,7 +112,7 @@ const info = { spaceId: task.spaceId, url: await page.url(), title: await page.t
 if (input.close) await task.finish({keep: []});
 return info;` });
       if (r.state !== 'succeeded') fail(r.error?.code || 'EGO_FAILED', r.error?.message || r.state);
-      return r.result;
+      return url ? { success: true, ...r.result, executionId: id } : r.result;
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 
@@ -108,15 +131,17 @@ return info;` });
       { ...fields(a), 'group-id': a.group, prop: a.property, value: a.value, 'dry-run': true }));
   const identity = { appId: optional, appCode: optional };
   register('yonbuilder_app_list', 'List or search applications in a selected session.',
-    { ...environment, keyword: optional, page: z.number().int().positive().optional(), size: z.number().int().positive().optional(),
-      full: z.boolean().optional() }, async a => query(await session(a), 'app', 'list', { name: a.keyword, page: a.page, size: a.size, full: a.full }));
+    { ...environment, keyword: optional, page: z.number().int().positive().optional(), size: z.number().int().positive().max(100).optional(),
+      full: z.boolean().optional() }, async a => listApps(await session(a), { name: a.keyword, page: a.page, size: a.size, full: a.full }));
   register('yonbuilder_app_get', 'Look up one application by ID or code.', { ...environment, ...identity }, async a => app(a, await session(a)));
   register('yonbuilder_bizobj_list', 'List business objects for the application.',
     { ...environment, appCode: word, appId: optional, domainCode: optional }, async a => {
       const selected = await session(a);
       const domain = a.domainCode || (await app(a, selected)).appDomain;
       if (!domain) fail('DOMAIN_NOT_FOUND', 'Supply the application domainCode.');
-      return query(selected, 'bizobj', 'list', { appcode: a.appCode, domaincode: domain });
+      const result = await query(selected, 'bizobj', 'list', { appcode: a.appCode, domaincode: domain });
+      const bizobjs = result.data?.bizobjs ?? result.bizobjs ?? [];
+      return { appCode: a.appCode, domainCode: domain, bizobjs, count: bizobjs.length };
     });
   register('yonbuilder_page_list', 'List business-object pages and resolved preview/designer URLs.',
     { ...environment, appCode: word, bizobjCode: word, full: z.boolean().optional(), flat: z.boolean().optional() }, async a => {

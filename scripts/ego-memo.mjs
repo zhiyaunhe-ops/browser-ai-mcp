@@ -159,9 +159,9 @@ export async function install(page, opts = {}) {
       const mod = await import(url.href); mod.attach(page); c.stats[stat] = mod.VERSION;
     } catch (error) { c.stats[`${stat}Error`] = error.message; }
   }
-  for (const key of ['context', 'inspect', 'find', 'entries', 'list', 'collect', 'scan', 'readValue', 'waitIdle', 'waitFor', 'click', 'transferState', 'transferRight']) {
+  for (const key of ['context', 'inspect', 'find', 'entries', 'list', 'collect', 'scan', 'readValue', 'waitIdle', 'waitFor', 'click', 'openSplitMenu', 'transferState', 'transferRight']) {
     wrap(page.ys, key, function (original, args) {
-      const stage = key === 'click' || key === 'transferRight' ? 'action' : 'adapter';
+      const stage = key === 'click' || key === 'openSplitMenu' || key === 'transferRight' ? 'action' : 'adapter';
       return measured(c, opts.pageLabel || page.label || 'unknown', `ys.${key}`, stage, () => original.apply(this, args));
     });
   }

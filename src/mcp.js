@@ -16,6 +16,7 @@ const text = z.string().min(1);
 const domainTag = text.optional().describe('Product edition for reusable knowledge. Use the same exact domain_tag across environments.');
 const idempotent = { runId: text, requestId: text };
 const pagination = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional() };
+const browserContext = z.object({ url: z.string().url().optional(), node: z.string().optional(), productVersion: z.string().optional() });
 const criterion = z.object({ id: text, path: z.string(), equals: z.unknown() });
 const formula = z.union([text, z.object({ expression: text, display: z.string().optional() }).strict(), z.null()]);
 const workbenchRound = { ...idempotent, pageLabel: text.optional(), domain_tag: domainTag };
@@ -35,7 +36,7 @@ function readWorkbench(service, businessTool, method, { runId, requestId, pageLa
 
 function createMcpServer(service = createService()) {
   const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '执行模型负责操作、记录和独立回读，结束时调用 run_finish 交接。遇到用户接手、权限或其他阻塞时，用 outcome=unknown 并在 note 说明缺口。评估模型在本机用 eval_pending、eval_packet 和 eval_session_context 对照原始会话，然后 eval_submit；路径缺失时按 eval_packet.sessionSearch 主动查找本机会话。完成后建议将可复用改动和验证依据通过 PR 提交到获授权的仓库，并返回链接。可执行问题调用 review_improve，实施代码、记忆、脚本或请求构造改动，再用 review_apply 登记实际版本。新 run 绑定 improvement，执行、独立回读并 eval_submit，回看 review_improvements。后续样本用 review_observe。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+    instructions: 'Read scriptCache and guidance before browser actions. For a matching procedure use its invoke.script. 执行模型负责操作、记录和独立回读，结束时调用 run_finish 交接。遇到用户接手、权限或其他阻塞时，用 outcome=unknown 并在 note 说明缺口。评估模型在本机用 eval_pending、eval_packet 和 eval_session_context 对照原始会话，然后 eval_submit；路径缺失时按 eval_packet.sessionSearch 主动查找本机会话。完成后建议将可复用改动和验证依据通过 PR 提交到获授权的仓库，并返回链接。可执行问题调用 review_improve，实施代码、记忆、脚本或请求构造改动，再用 review_apply 登记实际版本。新 run 绑定 improvement，执行、独立回读并 eval_submit，回看 review_improvements。后续样本用 review_observe。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
   });
   const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
     description, inputSchema, outputSchema: { data: resultSchema
@@ -91,11 +92,13 @@ function createMcpServer(service = createService()) {
     ...idempotent, targets: z.array(batchTarget).nonempty()
   }, args => verifyTemplateBatch(service, args));
   register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
-    requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
+    requestId: text, goal: text, url: z.string().url(), context: browserContext.optional(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
     domain_tag: domainTag, improvement: improvementLink.optional(), reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
   }, args => service.begin(args));
-  register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. Await each same-run round and use run_get with its executionId while queued or running. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
-    ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
+  register('browser_run', '先阅读 scriptCache 中匹配的脚本说明，再传 invoke.script 或带 scriptBriefingId 的 code。Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. Await each same-run round and use run_get with its executionId while queued or running. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
+    ...idempotent, purpose: z.enum(['execute', 'observe']), code: text.optional(),
+    script: z.object({ id: text, version: text, briefingId: text.optional() }).optional(),
+    scriptBriefingId: text.optional(), fallbackReason: text.optional(), context: browserContext.optional(),
     args: z.unknown().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     pageLabel: text.optional(), resumeAfterUserAction: z.boolean().optional(), memo: z.boolean().optional(),
     resolutions: z.array(z.object({ executionId: text, observationId: text, note: text })).optional()
@@ -111,7 +114,7 @@ function createMcpServer(service = createService()) {
     note: text.optional(), keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
   register('memory_search', 'Recall procedures and reviewLessons relevant to the goal. Set domain_tag to share applicable procedures and lessons across environments of the same product edition. Use an empty goal to browse that edition’s lessons. Use sourceRunId in evidence_query for the original Browser records.', {
-    url: z.string().url(), goal: z.string(), domain_tag: domainTag, limit: z.number().int().min(1).max(10).optional()
+    url: z.string().url(), goal: z.string(), context: browserContext.optional(), domain_tag: domainTag, limit: z.number().int().min(1).max(10).optional()
   }, args => service.searchMemory(args));
   register('memory_get', 'Read the complete procedure, revision and provenance for one memory.', {
     memoryId: text

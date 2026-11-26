@@ -88,7 +88,7 @@ export function analyzeCode(code = "") {
       const label = args[2]?.type === "ObjectExpression" && args[2].properties.find(p => p.type === "Property" && (p.key.name || p.key.value) === "label");
       if (label && !(label.value.type === "Literal" && !label.value.value)) result.labeledCoordCalls++;
     }
-    if (/(?:^|\.)ys\.(click|transferRight|find|list|collect|waitFor|fieldid|visible|context|inspect|entries|scan|readValue|waitIdle|transferState)$/.test(name)) result.ys = true;
+    if (/(?:^|\.)ys\.(click|openSplitMenu|transferRight|find|list|collect|waitFor|fieldid|visible|context|inspect|entries|scan|readValue|waitIdle|transferState)$/.test(name)) result.ys = true;
     if (/(?:^|\.)ys\.(find|list|collect|waitFor|visible|context|inspect|entries|scan|readValue|waitIdle|transferState)$/.test(name)) result.adapterCalls++;
     if (/\.mouse\.wheel$/.test(name)) result.wheel = true;
     if (/\.snapshot$/.test(name)) { result.snap = true; result.semanticSnapshotCalls++; }
