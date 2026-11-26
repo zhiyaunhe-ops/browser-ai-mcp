@@ -87,3 +87,9 @@ In a Codex `exec` wrapper, use `text({ browserOperation: { operation, runId, req
 Configure `BROWSER_AI_YONBUILDER_ROOT` (local plugin installation) and `BROWSER_AI_YONBUILDER_WORKSPACE` (authenticated workspace) in the MCP host. The server invokes the installed CLI with Node. Each operator supplies their own CLI, workspace and credentials.
 
 Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
+
+## YonCode host setup
+
+Register the root Node entry point `src/mcp.js` in the project's local MCP settings. Set `BROWSER_AI_EGO_BIN` to the installed ego lite executable. Supply the plugin root and authenticated workspace through the two YonBuilder variables described above. Keep machine paths and login data in the local host configuration.
+
+For runtime navigation, open the target through `yonbuilder_open` and pass its space ID to `yonbuilder_current_page`. For design-time edits, use the designer actions provided by the YonCode host. To verify an installation, list tools, read a known template field and run a dry-run preview against its exact container.
