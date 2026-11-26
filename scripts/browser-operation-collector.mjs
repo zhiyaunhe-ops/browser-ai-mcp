@@ -76,9 +76,10 @@ function wrappedOperations(input, coverage) {
       if (operation) add([{ operation, transport: "wrapped_mcp", args, code: args.code }]);
       if (webTool.test(name)) {
         add(webOperations(Object.fromEntries(properties.filter(item => item.value?.type === "ArrayExpression")
-          .map(item => [propertyName(item.key), item.value.elements.length])), "wrapped_mcp"));
+          .map(item => [propertyName(item.key), item.value.elements.filter(element => element && element.type !== "SpreadElement").length])), "wrapped_mcp"));
         if (!properties.length || properties.some(item => item.type === "SpreadElement"
-          || webActions.includes(propertyName(item.key)) && item.value?.type !== "ArrayExpression")) coverage.dynamicWebCalls++;
+          || webActions.includes(propertyName(item.key)) && (item.value?.type !== "ArrayExpression"
+            || item.value.elements.some(element => element?.type === "SpreadElement")))) coverage.dynamicWebCalls++;
       }
       if (member.computed && member.property.type !== "Literal") coverage.dynamicWrapperDispatches++;
       if (name === "exec_command") {
@@ -139,7 +140,8 @@ function normalize(record, source, file, line, sessionId) {
   if (["function_call", "custom_tool_call", "mcp_tool_call", "command_execution"].includes(data.type)) {
     return { ...base, callId: data.call_id ?? data.id, name: data.name ?? data.tool ?? (data.type === "command_execution" ? "exec_command" : ""),
       namespace: data.namespace ?? data.server, input: data.arguments ?? data.input ?? data.command,
-      ...(data.type === "command_execution" ? { output: data } : data.type === "mcp_tool_call" ? { output: data.result ?? data.error } : {}) };
+      ...(data.type === "command_execution" ? { output: data } : data.type === "mcp_tool_call"
+        ? { output: data.error ? { isError: true, error: data.error } : data.result } : {}) };
   }
   if (["function_call_output", "custom_tool_call_output"].includes(data.type)) {
     return { ...base, callId: data.call_id, output: data.output };

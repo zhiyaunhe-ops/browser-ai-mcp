@@ -13,7 +13,7 @@ function* shellEntries(command) {
     if (character !== undefined && !"\n;&|".includes(character)) continue;
     const entry = command.slice(start, index).trim();
     start = index + 1;
-    if (!entry) continue;
+    if (!entry || entry.startsWith("#")) continue;
     let body = "";
     const heredoc = /<<(-?)\s*['"]?([A-Za-z_]\w*)['"]?\s*$/.exec(entry);
     if (character === "\n" && heredoc) {
@@ -64,7 +64,8 @@ export function cliOperations(command, coverage) {
       const evalIndex = tokens.findIndex(token => /^(?:-e|--eval|-c)$/.test(token));
       const script = body || (evalIndex >= 0 ? tokens[evalIndex + 1] : "") || "";
       const library = /\b(playwright|selenium|puppeteer(?:-core)?|chrome-remote-interface)\b/i.exec(script);
-      if (library && (/\b(?:from|import|require)\b/.test(script) || /\b(?:launch|connectOverCDP|connect_over_cdp|webdriver)\b/.test(script))) {
+      const browserAction = /\b(?:(?:sync_playwright|async_playwright)\s*\(|(?:webdriver|puppeteer|chromium|firefox|webkit|browser|page)\.\w+\s*\(|(?:launch|connectOverCDP|connect_over_cdp)\s*\()/;
+      if (library && browserAction.test(script)) {
         add(library[1].toLowerCase(), /^[nbt]/.test(executable) ? script.replace(/^['"]|['"]$/g, "") : null);
       } else if (/\b(?:connectOverCDP|connect_over_cdp|newCDPSession|Browser\.getVersion|Target\.getTargets|devtools\/browser)\b/.test(script)) {
         add("CDP", /^[nbt]/.test(executable) ? script.replace(/^['"]|['"]$/g, "") : null);
