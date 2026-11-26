@@ -23,7 +23,9 @@ function wrap(target, key, invoke) {
   const original = target[key][ORIGINAL] || target[key];
   const wrapped = function (...args) { return invoke.call(this, original, args); };
   wrapped[ORIGINAL] = original;
-  target[key] = wrapped;
+  // The CDP guard locks the SDK prototype. Attach telemetry on the page instance.
+  if (key === 'cdp') Object.defineProperty(target, key, { value: wrapped, configurable: true, writable: true });
+  else target[key] = wrapped;
 }
 async function measured(c, label, method, stage, invoke) {
   const sequence = ++c.sequence, start = Date.now();

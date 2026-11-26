@@ -48,8 +48,9 @@ class EgoAdapter {
     // 用户代码放在其后，行号会整体后移，报错位置按诊断里的 stack 对齐即可。
     const memoPath = path.join(__dirname, '..', 'scripts', 'ego-memo.mjs');
     const networkPath = path.join(__dirname, '..', 'scripts', 'ego-network.mjs');
+    const cookieGuardPath = path.join(__dirname, '..', 'scripts', 'ego-cookie-guard.mjs');
     const memoRevision = createHash('sha256');
-    for (const file of [memoPath, networkPath, path.join(__dirname, 'memo.js'),
+    for (const file of [memoPath, networkPath, cookieGuardPath, path.join(__dirname, 'memo.js'),
       path.join(__dirname, '..', 'scripts', 'ys-locate.mjs'),
       path.join(__dirname, '..', 'scripts', 'ys-page.mjs'),
       path.join(__dirname, '..', 'scripts', 'ys-transfer.mjs'), path.join(__dirname, 'program-contract.js')]) {
@@ -59,6 +60,7 @@ class EgoAdapter {
     const revision = memoRevision.digest('hex').slice(0, 16);
     const memoUrl = `${pathToFileURL(memoPath).href}?revision=${revision}`;
     const networkUrl = `${pathToFileURL(networkPath).href}?revision=${revision}`;
+    const cookieGuardUrl = `${pathToFileURL(cookieGuardPath).href}?revision=${revision}`;
     const memoEnabled = options.memo !== false && process.env.EGO_MEMO !== '0';
     const prelude = `
 const { createNetworkCapture } = await import(${JSON.stringify(networkUrl)});
@@ -94,6 +96,8 @@ try {
     result = { finished: true };
   } else {
     const page = task.page(config.pageLabel);
+    const { installCookieGuard } = await import(${JSON.stringify(cookieGuardUrl)});
+    installCookieGuard(task, page);
     const input = config.args;
 ${prelude}
     // Bind helpers to this execution instead of the daemon's mutable global.
