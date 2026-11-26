@@ -56,7 +56,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
   }));
   return { schemaVersion: 1, runId, ...(run.improvement ? { improvement: run.improvement } : {}), reviewKey: run.feedback.requestId, reviewState,
     ...edition(run.domain_tag), goal: run.goal, url: run.url,
-    sessionSearch: sessionSearch(), ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.outcome, executionNote: run.feedback.note,
+    sessionSearch: sessionSearch(), ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.feedback.outcome, executionNote: run.feedback.note,
     lastWriteSequence: run.lastWriteSequence ?? 0, verification: run.feedback.verification,
     readbacks: service.criterionReadbacks(run), gaps: service.gaps(runId), relatedReviews,
     ...(run.reviewMemory ? { reviewMemory: run.reviewMemory } : {}),
@@ -144,8 +144,8 @@ function registerEvaluationTools(register, service) {
   const page = { cursor: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(50).optional() };
   const pagination = { nextCursor: z.number(), hasMore: z.boolean() };
   const state = z.enum(['not_ready', 'pending', 'reviewed']);
-  register('eval_pending', '读取已交接、待评估的任务，可按产品版本 domain_tag 筛选，按 nextCursor 翻页。', { ...page, ...editionField },
-    args => service.store.pendingReviews(args.cursor ?? 0, args.limit ?? 20,
+  register('eval_pending', '读取待评估任务。等待用户操作时立即补交接，活动或待核验任务静默满 30 分钟后补交接，结果记为 unknown。正在执行的操作会继续等待；可按 domain_tag 筛选并沿 nextCursor 翻页。', { ...page, ...editionField },
+    args => service.pendingReviews(args.cursor ?? 0, args.limit ?? 20,
       args.domain_tag === undefined ? undefined : resolveDomainTag({ domain_tag: args.domain_tag })),
     z.object({ runs: z.array(z.object({ ...runId, ...editionField, goal: text, outcome: text, reviewKey: text })), ...pagination }));
   register('eval_packet', '评估模型读取任务目标、验收条件、执行结果、独立回读和采集缺口。用 evidence_query 补读记录与请求。将 relatedReviews 中的 attemptId 填入 review_history 的 attempt_id 查询往期评估。同一问题的后续尝试沿用 problem_id，翻页和提交沿用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
@@ -168,7 +168,7 @@ function registerEvaluationTools(register, service) {
     const reviewState = service.reviewState(run);
     const review = reviewState === 'reviewed' ? service.store.get('evaluation', run.reviewId) : null;
     return { runId: run.runId, ...edition(run.domain_tag), goal: run.goal, url: run.url,
-      executionOutcome: run.outcome ?? null, reviewState,
+      executionOutcome: reviewState === 'not_ready' ? run.outcome ?? null : run.feedback.outcome, reviewState,
       review: review ? { ...edition(run.domain_tag), ...review } : null };
   }, z.object({ ...runId, ...editionField, goal: text, url: text, executionOutcome: text.nullable(), reviewState: state, review: report.nullable() }));
   register('eval_session_context', 'Read the original local harness JSONL by absolute path and physical line number. Compare the user request, corrections, tool output and final answer. Continue at nextLine. A truncated or missing record leaves that evidence incomplete.', {

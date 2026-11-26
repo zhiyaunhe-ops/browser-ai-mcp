@@ -669,6 +669,109 @@ test('legacy unknown handoff with a later execution is not queued for review', a
   assert.equal(pending.runs.some(item => item.runId === run.runId), false);
 });
 
+test('idle active and needs-verification runs receive an idempotent automatic review handoff', async t => {
+  let now = Date.UTC(2026, 10, 25, 0, 0, 0);
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: makeAdapter().adapter,
+    idFactory: identifiers(), clock: () => now, waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args = {}) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const active = await call('run_begin', { requestId: 'idle-active-begin', goal: 'Inspect active run',
+    url: 'https://example.test/active', criteria: [] });
+  const blocked = await call('run_begin', { requestId: 'idle-blocked-begin', goal: 'Inspect blocked run',
+    url: 'https://example.test/blocked', criteria: [] });
+  const oldBlocked = service.run(blocked.runId);
+  oldBlocked.state = 'needs_verification';
+  oldBlocked.outcome = 'unknown';
+  oldBlocked.updatedAt = now - 31 * 60 * 1000;
+  service.store.put('run', blocked.runId, oldBlocked);
+
+  now += 31 * 60 * 1000;
+  const pending = await call('eval_pending');
+  const rows = new Map(pending.runs.map(run => [run.runId, run]));
+  assert.ok(rows.has(active.runId));
+  assert.ok(rows.has(blocked.runId));
+  const activePacket = await call('eval_packet', { runId: active.runId });
+  const blockedPacket = await call('eval_packet', { runId: blocked.runId });
+  assert.equal(activePacket.executionOutcome, 'unknown');
+  assert.equal(blockedPacket.executionOutcome, 'unknown');
+  assert.equal(service.run(active.runId).state, 'active');
+  assert.equal(service.run(blocked.runId).state, 'needs_verification');
+
+  const repeated = await call('eval_pending');
+  assert.equal(repeated.runs.find(run => run.runId === active.runId).reviewKey, activePacket.reviewKey);
+  assert.equal(repeated.runs.find(run => run.runId === blocked.runId).reviewKey, blockedPacket.reviewKey);
+  assert.equal(service.run(active.runId).updatedAt, active.updatedAt);
+  assert.equal(service.run(blocked.runId).updatedAt, oldBlocked.updatedAt);
+});
+
+test('awaiting-user runs are handed off immediately and explicit unknown finish replaces the automatic handoff', async t => {
+  const { adapter } = makeAdapter({ async run() {
+    return { state: 'failed', executionStopped: true, spaceId: null,
+      error: { code: 'USER_IN_CONTROL', message: 'Waiting for user confirmation.' } };
+  } });
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter,
+    idFactory: identifiers(), waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args = {}) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const run = await call('run_begin', { requestId: 'awaiting-user-begin', goal: 'Wait for confirmation',
+    url: 'https://example.test/confirm', criteria: [] });
+  const started = await call('browser_run', { runId: run.runId, requestId: 'awaiting-user-action',
+    purpose: 'execute', code: 'return { waiting: true };' });
+  await waitForExecution(client, run.runId, started.executionId);
+  assert.equal(service.run(run.runId).state, 'awaiting_user');
+
+  const first = await call('eval_pending');
+  const automatic = first.runs.find(item => item.runId === run.runId);
+  assert.ok(automatic, 'awaiting_user is immediately reviewable');
+  const packet = await call('eval_packet', { runId: run.runId, reviewKey: automatic.reviewKey });
+  const repeated = await call('eval_pending');
+  assert.equal(repeated.runs.find(item => item.runId === run.runId).reviewKey, automatic.reviewKey);
+
+  const finished = await call('run_finish', { runId: run.runId, requestId: 'explicit-unknown-finish',
+    outcome: 'unknown', note: 'Waiting for explicit user confirmation.' });
+  assert.equal(finished.feedback.requestId, 'explicit-unknown-finish');
+  assert.equal(service.run(run.runId).state, 'awaiting_user', 'unknown handoff must preserve the resume gate');
+  const refreshed = await call('eval_pending');
+  assert.equal(refreshed.runs.find(item => item.runId === run.runId).reviewKey, 'explicit-unknown-finish');
+  const stale = await client.callTool({ name: 'eval_packet', arguments: { runId: run.runId, reviewKey: packet.reviewKey } });
+  assert.equal(stale.isError, true);
+});
+
+test('a new execution sequence invalidates an automatic review packet', async t => {
+  let now = Date.UTC(2026, 10, 25, 1, 0, 0);
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: makeAdapter().adapter,
+    idFactory: identifiers(), clock: () => now, waitMs: 5 });
+  const client = await withMcp(t, service);
+  const call = async (name, args = {}) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const run = await call('run_begin', { requestId: 'resume-invalidation-begin', goal: 'Check resume invalidation',
+    url: 'https://example.test/resume', criteria: [] });
+  now += 31 * 60 * 1000;
+  const handoff = (await call('eval_pending')).runs.find(item => item.runId === run.runId);
+  assert.ok(handoff);
+  const packet = await call('eval_packet', { runId: run.runId, reviewKey: handoff.reviewKey });
+  assert.equal(packet.reviewKey, handoff.reviewKey);
+
+  await call('browser_run', { runId: run.runId, requestId: 'resume-after-handoff', purpose: 'observe',
+    code: 'return { resumed: true };' });
+  const refreshedRun = service.run(run.runId);
+  now = refreshedRun.updatedAt + 31 * 60 * 1000;
+  const stale = await client.callTool({ name: 'eval_packet', arguments: { runId: run.runId, reviewKey: handoff.reviewKey } });
+  assert.equal(stale.isError, true, 'the old packet must not remain submit-ready after sequence advances');
+  assert.equal(service.reviewState(refreshedRun), 'not_ready');
+});
+
 test('review lessons follow the ASP edition across environments and isolate other editions', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });

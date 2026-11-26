@@ -99,6 +99,9 @@ function parseLegacy(files) {
   return { saved, journal, workflows };
 }
 
+const unsettledExecution = `kind='execution' AND (json_extract(json,'$.state') IN ('queued','running') OR
+  (json_extract(json,'$.state')='outcome_unknown' AND NOT coalesce(json_extract(json,'$.executionStopped'),0)))`;
+
 class Store {
   constructor(dataDir) {
     if (typeof dataDir !== 'string' || !dataDir.trim()) throw fail('INVALID_STORAGE_INPUT', 'dataDir is required');
@@ -113,6 +116,8 @@ class Store {
         kind TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL,
         PRIMARY KEY (kind, id)
       );
+      CREATE INDEX IF NOT EXISTS unsettled_execution_run ON entities (json_extract(json,'$.runId'),id)
+        WHERE ${unsettledExecution};
       CREATE TABLE IF NOT EXISTS evidence (
         cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         recordId TEXT NOT NULL UNIQUE, runId TEXT, executionId TEXT,
@@ -239,6 +244,22 @@ class Store {
     return Boolean(row?.current);
   }
 
+  handoffCandidates(idleBefore, domainTag) {
+    return this.db.prepare(`SELECT json FROM entities WHERE kind='run'
+      AND (json_extract(json,'$.state') = 'awaiting_user' OR
+        (json_extract(json,'$.state') IN ('active','needs_verification') AND json_extract(json,'$.updatedAt') <= ?))
+      AND (? IS NULL OR json_extract(json,'$.domain_tag') = ?)
+      AND (json_extract(json,'$.feedback') IS NULL OR (json_extract(json,'$.feedback.outcome') = 'unknown'
+        AND (json_extract(json,'$.feedback.sequence') IS NULL OR json_extract(json,'$.feedback.sequence') != json_extract(json,'$.sequence'))))
+      ORDER BY json_extract(json,'$.updatedAt'),id`).all(idleBefore, domainTag ?? null, domainTag ?? null)
+      .map(row => JSON.parse(row.json));
+  }
+
+  unsettledExecutions(runId) {
+    return this.db.prepare(`SELECT json FROM entities WHERE ${unsettledExecution}
+      AND json_extract(json,'$.runId')=? ORDER BY id`).all(runId).map(row => JSON.parse(row.json));
+  }
+
   pendingReviews(after, limit, domainTag) {
     // The feedback event supplies a stable cursor even when another model reviews
     // a run between pages, or an unknown outcome receives a newer handoff.
@@ -254,8 +275,8 @@ class Store {
       ORDER BY e.cursor LIMIT ?`).all(after, domainTag ?? null, domainTag ?? null, limit + 1);
     const page = rows.slice(0, limit);
     return { runs: page.map(row => {
-      const { runId, goal, outcome, feedback, domain_tag } = JSON.parse(row.json);
-      return { runId, goal, outcome, reviewKey: feedback.requestId, ...(domain_tag ? { domain_tag } : {}) };
+      const { runId, goal, feedback, domain_tag } = JSON.parse(row.json);
+      return { runId, goal, outcome: feedback.outcome, reviewKey: feedback.requestId, ...(domain_tag ? { domain_tag } : {}) };
     }), nextCursor: Number(page.at(-1)?.cursor ?? after), hasMore: rows.length > limit };
   }
 
