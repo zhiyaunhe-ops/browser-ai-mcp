@@ -2,6 +2,7 @@
 """Review a day of local browser operations and submit its report for GitHub approval."""
 
 import argparse
+import base64
 from collections import Counter, defaultdict
 from datetime import date
 import fcntl
@@ -14,10 +15,13 @@ import sys
 from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
 
 
+from browser_review_changes import prepare
+
+
 DEFAULT_REPOSITORY = "zhiyaunhe-ops/browser-ai-memory"
 COLLECTOR = Path(__file__).resolve().with_name("browser-operation-collector.mjs")
 GITHUB_API = ["gh", "api", "--hostname", "github.com"]
-PR_BODY = "请审批该日 Browser 操作独立评审及报告提出的后续行动。评审见 Files changed。"
+PR_BODY = "请审批当天的浏览器操作评审和对应修改。逐项处理情况、实现 PR 及未决事项见 Files changed。"
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -97,8 +101,10 @@ def review_brief(packet):
             if row["operation"] in selected:
                 continue
             selected.add(row["operation"])
-            sample = {key: row[key] for key in ("source", "operation", "category", "transport", "status", "executionState", "wrapperCallSiteOnly") if key in row}
+            sample = {key: row[key] for key in ("source", "operation", "category", "transport", "status", "executionState", "wrapperCallSiteOnly", "wrapperExecution", "executionStopped") if key in row}
             sample["row"] = index
+            if row.get("blockingExecutions"):
+                sample["blockingExecutionCount"] = len(row["blockingExecutions"])
             sample["references"] = {
                 kind: {key: ref[key] for key in ("line", "seq") if key in ref}
                 for kind, ref in row["evidence"].items() if ref
@@ -334,6 +340,44 @@ def publish(day, state, repository, base, supplied_report=None, revision=None):
         return json.loads(result.stdout)
 
 
+def publish_with_changes(day, state, repository, base, model, supplied=None, revision=None):
+    original = state / "review.md"
+    content = report_content(supplied or original)
+    if supplied:
+        if original.exists() and original.read_bytes() != content:
+            raise RuntimeError("外部报告与已保存的独立评审不同")
+        save(original, content)
+    previous = None
+    if revision:
+        root = state.parent
+        pointer = root / "current-revision"
+        prior = (root / pointer.read_text() if pointer.exists() else root) / "changes.json"
+        if prior.exists():
+            previous = json.loads(prior.read_bytes())
+    changes = prepare(day, state, content, model, previous)
+    summary = changes["summary"]
+    if changes.get("url"):
+        summary += f"\n\n[实现 PR]({changes['url']}) · `{changes['commit']}`"
+    if changes["blocked"]:
+        summary += "\n\n仍有建议需要补充证据或人工处理。"
+    delivered = state / "delivery"
+    delivered.mkdir(exist_ok=True)
+    report = delivered / "review.md"
+    save(report, content.rstrip() + ("\n\n## 按评审意见修改\n\n" + summary + "\n").encode())
+    if not revision:
+        # Upgrade an existing report-only PR only when its head still contains the exact original.
+        existing = find_pr(repository, f"browser-review/{day}")
+        if existing and existing["state"] == "open":
+            head = existing["head"]["sha"]
+            item = json.loads(command(GITHUB_API + [
+                f"repos/{repository}/contents/reviews/browser/{day}.md?ref={head}"
+            ]).stdout)
+            if base64.b64decode(item["content"]) == content:
+                revision = {"number": existing["number"], "head": head}
+    pr = publish(day, delivered, repository, base, revision=revision)
+    return pr, report, changes
+
+
 def refresh(day, state, repository, base, model):
     pending = state / "pending-refresh.json"
     existing = open_pr(find_pr(repository, f"browser-review/{day}"), base)
@@ -352,10 +396,10 @@ def refresh(day, state, repository, base, model):
 
     revision_dir = state / revision["directory"]
     report = review(day, revision_dir, model)
-    pr = publish(day, revision_dir, repository, base, revision=revision)
+    pr, report, changes = publish_with_changes(day, revision_dir, repository, base, model, revision=revision)
     save(state / "current-revision", revision_dir.name.encode())
     pending.unlink()
-    return pr, report
+    return pr, report, changes
 
 
 def main():
@@ -392,13 +436,12 @@ def main():
         if args.action in ("review", "run"):
             output["report"] = str(review(args.day, active, args.model))
         if args.action in ("publish", "run"):
-            pr = publish(args.day, active, args.repository, args.base, args.report)
-            report = active / "review.md"
+            pr, report, changes = publish_with_changes(args.day, active, args.repository, args.base, args.model, args.report)
         elif args.action == "refresh":
-            pr, report = refresh(args.day, state, args.repository, args.base, args.model)
+            pr, report, changes = refresh(args.day, state, args.repository, args.base, args.model)
         if args.action in ("publish", "run", "refresh"):
             output.update(
-                report=str(report), pullRequest=pr["html_url"],
+                changes=changes, report=str(report), pullRequest=pr["html_url"],
                 pullRequestState="merged" if pr.get("merged_at") else pr["state"],
                 commit=pr["head"]["sha"],
             )

@@ -23,6 +23,11 @@ def main():
         receipt = json.loads(result.stdout)
         (directory / "pr.json").write_text(result.stdout)
         message = f"{day} 浏览器 Eval 已在 Oracle 独立评审。GitHub PR 状态为 {receipt['pullRequestState']}。\n{receipt['pullRequest']}"
+        changes = receipt["changes"]
+        if changes.get("url"):
+            message += f"\n实现 PR {changes['url']}"
+        if changes["blocked"]:
+            message += "\n仍有评审意见待处理，详见报告的修改回执。"
         report = Path(receipt["report"]).read_text()
         conclusion = next((line.strip() for line in report.partition("## 结论")[2].splitlines()
                            if line.strip() and not line.startswith(("#", "|", "`"))), "")

@@ -148,7 +148,7 @@ npm ci
 python3 scripts/browser-review-pr.py run --day 2026-11-25
 ```
 
-`run` 采集该日期的操作，开启一个新的只读 Codex 会话独立评审，并把 Markdown 报告提交到私有仓库 `zhiyaunhe-ops/browser-ai-memory` 的 `main` 等待 GitHub PR 审批。Codex 通过标准输入接收全量计数、覆盖范围与分层样本，可按需读取本地证据包核对细节。独立评审返回完整的结构化结果后才会发布。每天使用 `browser-review/YYYY-MM-DD` 分支，提交 `reviews/browser/YYYY-MM-DD.md`。发布始终从目标分支临时检出，因此运行中的脚本可以来自本地工作树。采集原文和 Codex 日志保留在 Oracle，报告 PR 等待人工审批和合并。
+`run` 采集该日期的操作，开启一个新的只读 Codex 会话独立评审，并把 Markdown 报告提交到私有仓库 `zhiyaunhe-ops/browser-ai-memory` 的 `main` 等待 GitHub PR 审批。Codex 通过标准输入接收全量计数、覆盖范围与分层样本，可按需读取本地证据包核对细节。独立评审完成后，同一轮依据报告和 browser-ai-mcp 源文件生成并应用修改，把实际差异推到同日实现 PR。报告 PR 同时列出逐项处理结果、实现 PR 及提交号。已有实现或没有可执行意见时记录理由；未解决项保留在回执中。两个 PR 均由人审批。每天使用 `browser-review/YYYY-MM-DD` 分支，提交 `reviews/browser/YYYY-MM-DD.md`。发布始终从目标分支临时检出，因此运行中的脚本可以来自本地工作树。采集原文和 Codex 日志保留在 Oracle，报告 PR 等待人工审批和合并。
 
 ```sh
 python3 scripts/browser-review-pr.py collect --day 2026-11-25
