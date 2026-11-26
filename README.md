@@ -269,3 +269,4 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 
 - [安装与客户端配置](install.md)
 - [Agent 操作指南和脚本示例](SKILL.md)
+- [浏览器 Eval · 2026-11-25](reviews/browser/2026-11-25.md)
