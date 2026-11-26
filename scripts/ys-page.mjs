@@ -1,7 +1,15 @@
 /** Yonyou DOM augmentation. Native ego snapshots remain the general page reader. */
-export const VERSION = '2026-11-17.1';
+export const VERSION = '2026-11-19.1';
 export const BUSY = '.u-loader,.u-loading,.u-loading-mask,.wui-loading,.wui-loading-mask,.lebra-loading,.nc-loading,.loading-mask,.el-loading-mask,[aria-busy="true"]';
-const MODALS = '.wui-modal,.u-modal,.lebra-modal,.modal-dialog,.el-dialog,dialog,[role="dialog"]';
+export const SPLIT_BUTTON = {
+  group: '.divider-button-wrapper',
+  primary: '.hover-divider-btn-left-wrapper button.divider-main-button',
+  primaryCopy: 'button.divider-main-button',
+  menu: 'button.btn-right',
+  item: '.wui-menu-item,[role="menuitem"]',
+  popup: '.wui-dropdown',
+};
+const MODALS = '.wui-modal,.u-modal,.lebra-modal,.modal-dialog,.el-dialog,[role="dialog"]';
 const PARTS = ['fields', 'toolbar', 'rows', 'status'];
 function positive(value, fallback, name) {
   const result = value ?? fallback;
@@ -14,7 +22,7 @@ export async function context(page, opts = {}) {
   if (opts.framePath !== undefined && (typeof opts.framePath !== 'string' || !/^0(?:\/\d+)*$/.test(opts.framePath))) throw new TypeError('framePath must be an observed path such as 0/1');
   const config = { parts, scope: opts.scope ?? null, framePath: opts.framePath ?? null,
     maxFields: positive(opts.maxFields, 80, 'maxFields'), maxRows: positive(opts.maxRows, 200, 'maxRows'),
-    maxValueChars: positive(opts.maxValueChars, 256, 'maxValueChars'), busy: BUSY, modals: MODALS };
+    maxValueChars: positive(opts.maxValueChars, 256, 'maxValueChars'), busy: BUSY, modals: MODALS, split: SPLIT_BUTTON };
   const state = await page.evaluate(c => {
     const records = [], visited = new Set(), unreadFrames = [], provenance = new Map();
     const limits = { fields: false, toolbar: false, rows: false, status: false };
@@ -86,13 +94,40 @@ export async function context(page, opts = {}) {
         valueTruncated: typeof value === 'string' && value.length > c.maxValueChars,
         required: el.required === true || el.getAttribute('aria-required') === 'true', disabled, readonly: el.readOnly === true });
     }
-    if (c.parts.includes('toolbar')) for (const el of all('[fieldid],[data-fieldid]')) {
-      const fieldid = fieldidOf(el), key = fieldid.split('|').pop();
-      if (!/^(btn|add|save|commit|cancel|delete|print|output)|SettingBtn/i.test(key) || !visible(el)) continue;
-      if (toolbar.length >= 40) { limits.toolbar = true; break; }
-      const item = { key, fieldid, framePath: pathOf(el), name: text(el).slice(0, 80),
-        disabled: el.matches(':disabled') || Boolean(el.closest('[aria-disabled="true"],[inert]')) || /disabled/.test(String(el.className)) };
-      toolbar.push(item); signature.push(['toolbar', item]);
+    if (c.parts.includes('toolbar')) {
+      const disabled = el => el.matches(':disabled') || Boolean(el.closest('[aria-disabled="true"],[inert]')) ||
+        /(?:^|[\s-])disabled(?:$|[\s-])/.test(String(el.className));
+      const append = item => {
+        if (toolbar.length >= 40) { limits.toolbar = true; return; }
+        toolbar.push(item); signature.push(['toolbar', item]);
+      };
+      const splitGroups = new Set();
+      const readSplit = group => {
+        const own = selector => [...group.querySelectorAll(selector)].filter(el => el.closest(c.split.group) === group && visible(el));
+        const primaries = own(c.split.primary), arrows = own(c.split.menu);
+        if (primaries.length !== 1 || arrows.length !== 1) return null;
+        const [primary] = primaries, [menu] = arrows;
+        const name = (primary.getAttribute('aria-label') || text(primary)).slice(0, 80);
+        if (!name) return null;
+        const buttonCode = primary.getAttribute('btn-code') || '';
+        const fieldid = fieldidOf(primary) || fieldidOf(group);
+        const expanded = menu.getAttribute('aria-expanded');
+        return { kind: 'split-button', key: fieldid.split('|').pop() || buttonCode || name, fieldid,
+          buttonCode, framePath: pathOf(group), name, disabled: disabled(primary),
+          parts: { primary: { fieldid: fieldidOf(primary), disabled: disabled(primary) },
+            menu: { disabled: disabled(menu), expanded: expanded === 'true' ? true : expanded === 'false' ? false : null } } };
+      };
+      for (const el of all('[fieldid],[data-fieldid],' + c.split.group)) {
+        if (el.matches(c.split.group)) {
+          const split = readSplit(el);
+          if (split) { splitGroups.add(el); append(split); continue; }
+        }
+        if (splitGroups.has(el.closest(c.split.group))) continue;
+        const fieldid = fieldidOf(el), key = fieldid.split('|').pop();
+        if (!/^(btn|add|save|commit|cancel|delete|print|output)|SettingBtn/i.test(key) || !visible(el)) continue;
+        append({ key, fieldid, framePath: pathOf(el), name: text(el).slice(0, 80),
+          disabled: disabled(el) || /disabled/.test(String(el.className)) });
+      }
     }
     let rows = 0;
     if (c.parts.includes('rows')) {
@@ -184,12 +219,14 @@ export async function scan(page, opts = {}) {
   const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
   const elements = observation.items.slice(0, limit).map((item, index) => ({ index: index + 1, tag: item.tag, role: item.role || '',
     name: clean(item.aria || item.title || item.dataTitle || item.label || item.text || item.value).slice(0, 80),
-    fieldid: item.fieldid || '', value: clean(item.value).slice(0, 80), disabled: item.disabled, inView: item.inView, frame: item.frame, framePath: item.framePath }));
+    fieldid: item.fieldid || '', value: clean(item.value).slice(0, 80), disabled: item.disabled, inView: item.inView, frame: item.frame, framePath: item.framePath,
+    ...(item.splitButton ? { splitButton: item.splitButton } : {}) }));
   const truncated = observation.limitReached || observation.items.length > limit;
   return { ok: observation.complete && !truncated, complete: observation.complete && !truncated,
     url: observation.url || '', elements, scannedTotal: observation.scannedTotal, truncated,
     elementLimit: observation.elementLimit, displayLimit: limit, coverage: observation.coverage, shadowDOM: 'not-traversed',
-    unreadFrames: observation.unreadFrames, scopeMatches: observation.scopeMatches, documents: observation.documents };
+    unreadFrames: observation.unreadFrames, scopeMatches: observation.scopeMatches, documents: observation.documents,
+    ...(observation.activeMenus !== undefined ? { activeMenus: observation.activeMenus } : {}) };
 }
 /** Read one observed element without treating missing, ambiguous and empty as equal. */
 export async function readValue(page, opts = {}) {

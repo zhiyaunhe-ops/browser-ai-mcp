@@ -8,6 +8,7 @@ const { bindImprovement } = require('./improvements');
 const { Store } = require('./storage');
 const { Memory, matchesScope } = require('./memory');
 const { EgoAdapter } = require('./ego');
+const { ScriptCache, nodeFromUrl } = require('./script-cache');
 const { MEMO_SHORT } = require('./memo');
 const { assertProgram } = require('./program-contract');
 const { callReviewToolkit, resolveDomainTag, resolveDomainTags } = require('./review-toolkit');
@@ -80,6 +81,8 @@ class BrowserService {
     this.clock = options.clock || Date.now;
     this.id = options.idFactory || crypto.randomUUID;
     this.waitMs = options.waitMs ?? 100;
+    this.scriptCache = options.scriptCache || new ScriptCache();
+    this.scriptBriefings = new Map();
     this.ownerId = crypto.randomUUID();
     this.pending = new Map();
     this.closed = false;
@@ -199,12 +202,83 @@ class BrowserService {
     return this.memory.search({ url, goal: goal.slice(0, 500), ...edition(domainTag) });
   }
 
+  scriptContext(run, args = {}) {
+    const previous = run.scriptContext || { url: run.url, node: nodeFromUrl(run.url), productVersion: '', pageLabel: run.pageLabel };
+    const declared = args.context || {};
+    const url = declared.url ?? previous.url;
+    const pageLabel = args.pageLabel || previous.pageLabel || run.pageLabel;
+    const changedPage = url !== previous.url || pageLabel !== previous.pageLabel;
+    return { url, pageLabel,
+      node: declared.node ?? (changedPage ? nodeFromUrl(url) : previous.node),
+      productVersion: declared.productVersion ?? previous.productVersion };
+  }
+
+  prepareScripts(run, args = {}, { resume = false } = {}) {
+    const context = this.scriptContext(run, args);
+    const matches = this.scriptCache.match({ goal: run.goal, ...context });
+    const scope = fingerprint({ ownerId: this.ownerId, goal: run.goal, context,
+      packages: matches.map(({ id, version, digest }) => ({ id, version, digest })) });
+    const previous = this.scriptBriefings.get(run.runId);
+    const acknowledgment = args.script?.briefingId || args.scriptBriefingId;
+    const forceResume = resume && args.resumeAfterUserAction &&
+      !(previous?.resumePending && acknowledgment === previous.briefingId);
+    if (!isDeepStrictEqual(run.scriptContext, context)) {
+      run.scriptContext = context;
+      this.store.put('run', run.runId, run);
+    }
+    if (previous?.scope === scope && !forceResume) return previous.view;
+    const briefingId = matches.length ? this.id() : null;
+    const view = { status: matches.length ? 'matched' : 'miss', context,
+      matches: matches.map(match => ({ ...match,
+        currentNode: context.node || '待本次页面核对',
+        currentProductVersion: context.productVersion || '未提供具体发行号',
+        briefingId,
+        invoke: { tool: 'browser_run', purpose: 'execute',
+          script: { id: match.id, version: match.version, briefingId } } })),
+      policy: '先读匹配脚本说明，再决定动作和参考普通经验；memo:false 不跳过说明。未命中可使用普通 code。' };
+    this.scriptBriefings.set(run.runId, { scope, briefingId, view, resumePending: !!forceResume });
+    this.record(run, null, 'incident', { type: 'script-cache', phase: 'match', context,
+      reason: forceResume ? 'resume_after_user_action' : previous ? 'context_or_package_changed' : 'new_or_restored_session',
+      matches: matches.map(({ id, version, digest }) => ({ id, version, digest })) });
+    if (matches.length) this.record(run, null, 'incident', { type: 'script-cache', phase: 'inject',
+      briefingId, context, briefings: view.matches });
+    return view;
+  }
+
+  scriptResponse(run, data, scriptCache = this.prepareScripts(run)) {
+    const { scriptCache: usedScript, ...body } = data;
+    return { scriptCache,
+      guidance: [...scriptCache.matches.map(match => ({ kind: 'script', ...match })),
+        { kind: 'memory', ...run.recalledMemory }],
+      ...body, ...(usedScript?.id ? { usedScript } : {}) };
+  }
+
+  scriptGate(args, briefing) {
+    const selected = args.script && briefing.matches.find(match => match.id === args.script.id);
+    if (args.script && !selected) return briefing.matches.length ? 'package_not_matched' : 'no_matching_package';
+    if (selected && selected.version !== args.script.version) return 'version_changed';
+    if (briefing.matches.length && (args.script?.briefingId || args.scriptBriefingId) !== briefing.matches[0].briefingId) return 'briefing_not_current';
+    return null;
+  }
+
+  scriptRequired(run, args, briefing, reason) {
+    this.record(run, null, 'incident', { type: 'script-cache', phase: 'fallback', reason,
+      requestedScript: args.script || null, context: briefing.context });
+    return this.scriptResponse(run, {
+      state: reason === 'no_matching_package' ? 'script_cache_unavailable' : 'script_briefing_required',
+      executionStarted: false, reason,
+      next: reason === 'no_matching_package'
+        ? 'The selected package does not match. Observe the current page and use ordinary code exploration.'
+        : 'Read the current script briefing before choosing an action. Retry the same requestId with invoke.script, or use code with scriptBriefingId and a fallbackReason.'
+    }, briefing);
+  }
+
   begin(args, domainContext) {
     return this.store.transaction(() => {
       const request = this.request('run_begin', null, args);
       if (request.previous) {
         const run = this.run(request.previous.runId);
-        return { ...run, recalledMemory: this.recalledForEdition(run), memo: MEMO_SHORT };
+        return this.scriptResponse(run, { ...run, recalledMemory: this.recalledForEdition(run), memo: MEMO_SHORT });
       }
       required(args.goal, 'goal');
       const url = new URL(required(args.url, 'url'));
@@ -240,7 +314,7 @@ class BrowserService {
       this.store.put('run', runId, run);
       this.saveRequest(request, { runId });
       this.record(run, null, 'incident', { type: 'run-begin', goal: run.goal });
-      return Object.assign(run, { memo: MEMO_SHORT });
+      return this.scriptResponse(run, { ...run, memo: MEMO_SHORT }, this.prepareScripts(run, args));
     });
   }
 
@@ -286,7 +360,25 @@ class BrowserService {
       if (request.previous) return this.store.get('execution', request.previous.executionId);
       if (run.feedback && run.feedback.outcome !== 'unknown' || !['active', 'needs_verification', 'awaiting_user'].includes(run.state)) throw problem('RUN_CLOSED', 'This run is already finishing or closed');
       if (run.state === 'awaiting_user' && !args.resumeAfterUserAction) throw problem('USER_ACTION_REQUIRED', 'Complete the requested browser action, then resumeAfterUserAction after user confirmation');
-      required(args.code, 'code');
+      const briefing = this.prepareScripts(run, args, { resume: true });
+      const reason = this.scriptGate(args, briefing);
+      if (reason) return this.scriptRequired(run, args, briefing, reason);
+      if (args.script && args.code !== undefined) throw problem('INVALID_ARGUMENT', 'Provide script or code, not both');
+      if (args.script && args.purpose !== 'execute') throw problem('INVALID_ARGUMENT', 'Cached entry scripts require purpose execute; independently observe with ordinary code');
+      let code = args.code;
+      let usedScript = null;
+      if (args.script) {
+        const selected = briefing.matches.find(match => match.id === args.script.id);
+        try { code = this.scriptCache.code(selected.id, selected.version, selected.digest); }
+        catch (error) {
+          if (error.code !== 'SCRIPT_VERSION_MISMATCH' && error.code !== 'SCRIPT_NOT_FOUND') throw error;
+          this.scriptBriefings.delete(run.runId);
+          return this.scriptRequired(run, args, this.prepareScripts(run, args), 'package_changed');
+        }
+        usedScript = { id: selected.id, version: selected.version, digest: selected.digest,
+          briefingId: selected.briefingId, context: briefing.context };
+      }
+      required(code, 'code');
       if (!['execute', 'observe'].includes(args.purpose)) throw problem('INVALID_ARGUMENT', 'purpose must be execute or observe');
       if (args.timeoutMs !== undefined && (!Number.isInteger(args.timeoutMs) || args.timeoutMs < 1000 || args.timeoutMs > 120000)) throw problem('INVALID_ARGUMENT', 'timeoutMs must be between 1000 and 120000');
       const previous = this.executions(run.runId);
@@ -324,12 +416,12 @@ class BrowserService {
       }
       // Reject definite SDK/context mistakes before dispatch or write sequencing.
       // Request deduplication above still returns an existing invocation unchanged.
-      const programCheck = assertProgram(args.code);
+      const programCheck = assertProgram(code);
       const executionId = this.id();
       if (run.feedback) run.feedback.sequence ??= run.sequence;
       const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url), run.domain_tag);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
-        sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
+        sequence: ++run.sequence, purpose: args.purpose, code, ...(usedScript ? { scriptCache: usedScript } : {}), args: args.args ?? null,
         ...(previous.length ? { previousExecutionId: previous.at(-1).executionId } : {}),
         ...edition(run.domain_tag),
         ...(args.businessTool ? { businessTool: args.businessTool } : {}),
@@ -345,12 +437,19 @@ class BrowserService {
       this.store.put('run', run.runId, run);
       this.store.put('execution', executionId, execution);
       this.saveRequest(request, { runId: run.runId, executionId });
+      const currentBriefing = this.scriptBriefings.get(run.runId);
+      if (currentBriefing) currentBriefing.resumePending = false;
+      if (usedScript) this.record(run, executionId, 'incident', { type: 'script-cache', phase: 'use', ...usedScript });
+      else this.record(run, executionId, 'incident', { type: 'script-cache', phase: 'fallback',
+        reason: briefing.matches.length ? args.fallbackReason || 'caller_selected_code_after_briefing' : 'no_matching_package',
+        briefingId: args.scriptBriefingId || null, context: briefing.context });
       this.record(run, executionId, 'execution', { phase: 'intent', sequence: execution.sequence, purpose: execution.purpose });
       return execution;
     });
+    if (execution.executionStarted === false) return execution;
     if (execution.state === 'queued' && execution.ownerId === this.ownerId && !this.pending.has(execution.executionId)) this.launchExecution(execution);
     await this.wait(this.pending.get(execution.executionId));
-    return this.executionView(this.store.get('execution', execution.executionId));
+    return this.scriptResponse(this.run(args.runId), this.executionView(this.store.get('execution', execution.executionId)));
   }
 
   launchExecution(execution) {
@@ -420,6 +519,19 @@ class BrowserService {
       if (Array.isArray(result.result?.evidence)) for (const item of result.result.evidence) {
         if (item && ['network', 'dom'].includes(item.kind)) this.record(run, executionId, item.kind, item.payload || item);
       }
+      if (execution.scriptCache) {
+        const observed = result.result;
+        if (result.state === 'succeeded' && observed && typeof observed === 'object') {
+          run.scriptContext = { ...run.scriptContext,
+            ...(typeof observed.url === 'string' ? { url: observed.url } : {}),
+            ...(Object.hasOwn(observed, 'node') ? { node: observed.node || '' } : {}) };
+        }
+        this.record(run, executionId, 'incident', { type: 'script-cache', phase: 'result',
+          ...execution.scriptCache, executionState: result.state, pageResult: small(observed), error: execution.error });
+        if (execution.error || observed?.state === 'unknown') this.record(run, executionId, 'incident', {
+          type: 'script-cache', phase: 'fallback', ...execution.scriptCache,
+          reason: observed?.reason || execution.error?.code || 'page_state_unknown' });
+      }
       if (result.state === 'outcome_unknown') run.state = 'needs_verification';
       if (/USER_IN_CONTROL|TASK_SPACE_INACTIVE|TASK_SPACE_UNAVAILABLE/.test(result.error?.code || '')) run.state = 'awaiting_user';
       run.updatedAt = this.now();
@@ -454,11 +566,11 @@ class BrowserService {
     } else executions = executions.slice(-(args.limit || 30));
     const records = this.store.query({ runId: run.runId, after: args.cursor || 0, limit: args.limit || 30 });
     const { finishArguments, recalledMemory, ...publicRun } = run;
-    return { ...publicRun, recalledMemory: this.recalledForEdition(run),
+    return this.scriptResponse(run, { ...publicRun, recalledMemory: this.recalledForEdition(run),
       reviewState: this.reviewState(run), executionCount, executions: executions.map(e => this.executionView(e)),
       ...(run.feedback ? { readbacks: this.criterionReadbacks(run) } : {}),
       ...records, records: records.records.map(r => ({ ...edition(run.domain_tag), ...r, payload: small(r.payload) })),
-      gaps: this.gaps(run.runId, args.executionId) };
+      gaps: this.gaps(run.runId, args.executionId) });
   }
 
   async finish(args) {
@@ -597,7 +709,11 @@ class BrowserService {
     const domainTag = resolveDomainTag(args.domain_tag === undefined
       ? { goal: args.goal, asp_project: aspProject(args.url) }
       : { domain_tag: args.domain_tag });
-    return this.memory.search({ ...args, domain_tag: domainTag });
+    const memory = this.memory.search({ ...args, domain_tag: domainTag });
+    const matches = this.scriptCache.match({ goal: args.goal, url: args.context?.url || args.url,
+      node: args.context?.node, productVersion: args.context?.productVersion });
+    const scriptCache = { matches, next: 'Read matching descriptions first; use run_begin to obtain the current version-bound invoke.script.' };
+    return { scriptCache, guidance: [...matches.map(match => ({ kind: 'script', ...match })), { kind: 'memory', ...memory }], ...memory };
   }
   getMemory(args) { return this.memory.get(args.memoryId); }
   gaps(runId, executionId) {
