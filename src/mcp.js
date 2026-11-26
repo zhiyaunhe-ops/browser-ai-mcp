@@ -52,10 +52,12 @@ function createMcpServer(service = createService()) {
         ...(error.blockingExecutions === undefined ? {} : { blockingExecutions: error.blockingExecutions }),
         ...(error.readbacks === undefined ? {} : { readbacks: error.readbacks }),
         ...(error.executionStarted === undefined ? {} : { executionStarted: error.executionStarted }),
+        ...(Array.isArray(error.candidates) ? { candidates: error.candidates } : {}),
         ...(Array.isArray(error.issues) ? { issues: error.issues } : {}) };
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
+  require('./yonbuilder').registerYonbuilder(register, service);
   registerEvaluationTools(register, service);
   register('asp_workbench_open_node', '在当前 ASP UAT 任务中按精确服务名打开工作台节点。从目录取得编码后请求服务详情并调用工作台原生导航，失败后走工作台搜索及点选。结果通过 run_get 读取，可在同一任务继续操作。', {
     ...workbenchRound, nodeName: text.describe('工作台中的精确服务名称，例如 UI模板。'),
