@@ -1,9 +1,15 @@
 ---
 name: browser-ai
-description: Run browser tasks through MCP and ego lite with scoped Yonyou readers, bulk picker controls and saved execution evidence.
+description: Run browser tasks through MCP and ego lite with scoped Yonyou readers, bulk picker controls and saved execution evidence. Look up SQL Server tables, columns, keys and indexes on demand.
 ---
 
 # Browser tasks through MCP
+
+For database structure, call `yonbuilder_cli` directly with `entry="schema"`. The MCP host needs PowerShell 7 and a local read-only SQL Server connection string in `BROWSER_AI_SCHEMA_CONNECTION`. Keep the connection string in the host environment.
+
+- If the schema and table are known, use `{"entry":"schema","argv":["table","dbo","Invoice"]}`. Read `columns`, `indexes` and `foreignKeys`. Composite primary-key columns have `primaryKey=true` and are ordered by `keyOrdinal`.
+- To find a table or column, use `["tables","invoice","0","50"]` or `["columns","invoice_id","0","50"]`. Supply a search term. For another page pass `nextOffset` as a string. For exact column matches compare the returned name.
+- Use `["info"]` to identify the database and query time. Only declared database constraints appear in `foreignKeys`. Verify application-level relationships from the entity model.
 
 Start with `run_begin` and a goal, URL and observable business criteria. The first `browser_run` opens the task Space. Run scripts receive `task`, `page` and JSON `input`. Read `ego-browser skill` for the installed Page and TaskSpace API.
 
