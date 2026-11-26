@@ -25,7 +25,10 @@ const resultId = /"(?:call_id|toolCallId)"\s*:\s*"([^"]+)"/;
 const sessionFile = /\.(?:jsonl(?:\.zs(?:t|td))?|zstd)$/i;
 const stateSet = new Set(["running", "succeeded", "failed", "outcome_unknown", "cancelled", "pending", "queued", "needs_user_action", "completed"]);
 const operationSuccess = new Set(["updated", "verified", "already_set", "inspected"]);
-const operationFailure = new Set(["verification_failed", "not_found", "ambiguous", "read_error"]);
+const operationFailure = new Set(["verification_failed", "not_found", "ambiguous", "read_error",
+  "template_not_found", "field_not_found", "ambiguous_template", "ambiguous_field",
+  "template_mismatch", "field_properties_unavailable"]);
+const runningCell = /^Script running with cell ID (\S+)/i;
 
 const json = value => {
   if (typeof value !== "string") return value;
@@ -55,11 +58,18 @@ function wrappedOperations(input, coverage) {
     return [];
   }
   const operations = [];
+  function guardSkips(node, parent) {
+    const test = literal(parent?.test ?? parent?.left);
+    if (typeof test !== "boolean") return false;
+    return (parent.consequent === node && !test) || (parent.alternate === node && test)
+      || (parent.right === node && (parent.operator === "&&" && !test || parent.operator === "||" && test));
+  }
   let toolInvocations = 0;
-  const visit = (node, conditional = false, parent = null) => {
+  const visit = (node, conditional = false, parent = null, skipped = false) => {
     if (!node || typeof node !== "object") return;
     if (/(?:Function|For|While|Switch)/.test(node.type) || ["IfStatement", "ConditionalExpression", "LogicalExpression", "CatchClause"]
       .includes(node.type)) conditional = true;
+    skipped ||= guardSkips(node, parent);
     const member = node.type === "CallExpression" ? node.callee : null;
     if (node.type === "MemberExpression" && node.object.name === "tools" && parent?.callee !== node
       && (node.computed && node.property.type !== "Literal" || browserName.test(propertyName(node.property)))) {
@@ -72,7 +82,7 @@ function wrappedOperations(input, coverage) {
       const properties = node.arguments[0]?.properties || [];
       const args = Object.fromEntries(properties.filter(item => item.type === "Property")
         .map(item => [propertyName(item.key), literal(item.value)]));
-      const add = detected => operations.push(...detected.map(item => ({ ...item, offset: member.start, conditional })));
+      const add = detected => operations.push(...detected.map(item => ({ ...item, offset: member.start, conditional, skipped })));
       if (operation) add([{ operation, transport: "wrapped_mcp", args, code: args.code }]);
       if (webTool.test(name)) {
         add(webOperations(Object.fromEntries(properties.filter(item => item.value?.type === "ArrayExpression")
@@ -90,8 +100,8 @@ function wrappedOperations(input, coverage) {
       }
     }
     for (const value of Object.values(node)) {
-      if (Array.isArray(value)) value.forEach(child => visit(child, conditional, node));
-      else if (value && typeof value === "object") visit(value, conditional, node);
+      if (Array.isArray(value)) value.forEach(child => visit(child, conditional, node, skipped));
+      else if (value && typeof value === "object") visit(value, conditional, node, skipped);
     }
   };
   visit(ast);
@@ -154,6 +164,11 @@ function outputParts(output) {
   const visit = (value, depth = 0) => {
     if (depth > 10 || value == null) return;
     if (typeof value === "string") {
+      const cellOutput = value.match(/^Script (?:completed|running with cell ID \S+)\r?\nWall time:[^\n]*\nOutput:\r?\n([\s\S]*)$/i);
+      if (cellOutput) {
+        visit(cellOutput[1], depth + 1);
+        return;
+      }
       const decoded = json(value.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
       if (decoded && typeof decoded === "object") visit(decoded, depth + 1);
       else if (value.includes("\n")) for (const line of value.split("\n")) {
@@ -192,7 +207,9 @@ function executionMetadata(value) {
   if (!executionId || !state || state === "completed") return null;
   return { executionId, state, runId: value.runId, requestId: value.requestId, businessTool: value.businessTool,
     observationId: value.observationId, explicitId: Boolean(value.executionId), trace: normalizeObservationTrace(value.observationTrace), networkCapture: value.networkCapture,
-    errorCode: value.error?.code, purpose: value.purpose };
+    errorCode: value.error?.code, purpose: value.purpose,
+    startedAt: value.startedAt, finishedAt: value.finishedAt, executionStopped: value.executionStopped,
+    previousExecutionId: value.previousExecutionId };
 }
 
 function outcome(value, operation, transport) {
@@ -279,6 +296,8 @@ async function scanSource(source, roots, { inDay, until }) {
   coverage.dayScoped = ["malformedArguments", "unparsedWrappers", "dynamicWrapperDispatches", "dynamicShellCommands",
     "dynamicWebCalls", "uninspectedScriptCommands", "missingCallIds", "duplicateCalls", "conflictingExecutionStates"];
   const calls = new Map();
+  const waits = new Map();
+  const cells = new Map();
   const resultRecords = [];
   const sessions = new Map();
   const processFile = async (file, mode) => {
@@ -296,11 +315,11 @@ async function scanSource(source, roots, { inDay, until }) {
               continue;
             }
           }
-          if (!/"type"\s*:\s*"(?:tool\/call|function_call|custom_tool_call|mcp_tool_call|command_execution)"/.test(line) || !callMarker.test(line)) continue;
+          if (!/"type"\s*:\s*"(?:tool\/call|function_call|custom_tool_call|mcp_tool_call|command_execution)"/.test(line) || (!callMarker.test(line) && !(source === "oracle_codex" && /"name"\s*:\s*"wait"/.test(line)))) continue;
         } else {
           if (!/"type"\s*:\s*"(?:tool\/result|function_call_output|custom_tool_call_output)"/.test(line)) continue;
           const id = resultId.exec(line)?.[1];
-          if (!id || !calls.has(callKey({ sessionId, callId: id }))) continue;
+          if (!id || !calls.has(callKey({ sessionId, callId: id })) && !waits.has(callKey({ sessionId, callId: id }))) continue;
         }
         const raw = json(line);
         if (!raw) { coverage.malformedLines++; continue; }
@@ -311,6 +330,11 @@ async function scanSource(source, roots, { inDay, until }) {
           continue;
         }
         if (record.time > until) continue;
+        if (source === "oracle_codex" && record.name === "wait" && record.callId) {
+          const cellId = json(record.input)?.cell_id;
+          if (typeof cellId === "string") waits.set(callKey(record), cellId);
+          continue;
+        }
         const selected = record.time !== null && inDay(record.time);
         const dayCoverage = selected ? coverage : outsideDay;
         const operations = readCall(record, dayCoverage);
@@ -331,6 +355,7 @@ async function scanSource(source, roots, { inDay, until }) {
           if (operation.args?.purpose) row.purpose = operation.args.purpose;
           if (operation.wrapped) row.wrapperCallSiteOnly = true;
           if (operation.conditional) row.wrapperConditional = true;
+          if (operation.skipped) row.wrapperExecution = "condition_not_met";
           return { operation, row };
         });
         calls.set(key, { record, rows, selected });
@@ -346,10 +371,19 @@ async function scanSource(source, roots, { inDay, until }) {
   const states = new Map();
   const conflicts = new Set();
   for (const result of resultRecords.sort((a, b) => a.time - b.time)) {
-    const call = calls.get(callKey(result));
+    const key = callKey(result);
+    const cellKey = cellId => `${result.sessionId}\0${cellId}`;
+    const waitedCell = waits.get(key);
+    const call = waitedCell ? cells.get(cellKey(waitedCell)) : calls.get(key);
     if (!call || result.time < call.record.time) continue;
+    const chunks = Array.isArray(result.output) ? result.output.map(item => item?.text ?? item) : [result.output];
+    const yieldedCell = chunks.map(chunk => typeof chunk === "string" ? runningCell.exec(chunk)?.[1] : null).find(Boolean);
+    if (yieldedCell && !waitedCell) cells.set(cellKey(yieldedCell), call);
+    if (waitedCell && !yieldedCell) cells.delete(cellKey(waitedCell));
     const values = outputParts(result.output);
-    const executions = values.map(executionMetadata).filter(Boolean);
+    const tagged = values.filter(value => value?.browserOperation);
+    const untagged = values.filter(value => !value?.browserOperation);
+    const executions = untagged.map(executionMetadata).filter(Boolean);
     const resultEvidence = evidence(result);
     // A projection with a state and abbreviated ID can refer to a run. Only
     // accept it from an execution tool, or after the execution ID is observed.
@@ -364,11 +398,42 @@ async function scanSource(source, roots, { inDay, until }) {
       }
     }
     for (const { row, operation } of call.rows) {
+      if (operation.wrapped) {
+        row.evidence.wrapper ||= resultEvidence;
+        if (yieldedCell || waitedCell) {
+          row.wrapperCellId = yieldedCell ?? waitedCell;
+          if (waitedCell && !yieldedCell) row.evidence.wrapperCompletion = resultEvidence;
+        }
+        for (const value of tagged) {
+          const identity = value.browserOperation;
+          if (identity.operation !== row.operation) continue;
+          const matches = call.rows.filter(({ row: other }) => other.operation === identity.operation &&
+            (identity.operationIndex === undefined || identity.operationIndex === other.operationIndex) &&
+            (!other.requestId || other.requestId === identity.requestId) && (!other.runId || other.runId === identity.runId));
+          if (matches.length !== 1 || matches[0].row !== row) continue;
+          const responses = outputParts(value.result);
+          const response = responses.find(item => typeof item?.runId === "string" || typeof item?.code === "string");
+          const invocation = { requestId: identity.requestId, runId: response?.runId ?? identity.runId,
+            executionId: response?.executionId, observationId: response?.observationId,
+            errorCode: response?.code ?? response?.error?.code, evidence: resultEvidence };
+          if (value.skipped === true && typeof value.reason === "string") {
+            (row.wrapperInvocations ||= []).push({ ...invocation, state: "condition_not_met", reason: value.reason });
+          } else if (responses.length) {
+            const statuses = responses.map(item => outcome(item, row.operation, row.transport));
+            const status = statuses.includes("fail") ? "fail" : statuses.includes("ok") ? "ok" : "unknown";
+            (row.wrapperInvocations ||= []).push({ ...invocation, state: "observed", status });
+            for (const item of responses.map(executionMetadata).filter(Boolean)) {
+              const previous = states.get(item.executionId);
+              if (laterState(previous, item)) states.set(item.executionId, { ...item, evidence: resultEvidence });
+            }
+          }
+        }
+      }
+      if (operation.skipped || row.wrapperInvocations?.length) continue;
       const direct = call.rows.length === 1 && operation.attributable !== false;
-      const uniqueOperation = call.rows.filter(item => item.row.operation === row.operation).length === 1;
       const attributed = executions.filter(item => item.executionId === row.executionId
-        || row.requestId && item.requestId === row.requestId && (!row.runId || !item.runId || row.runId === item.runId)
-        || uniqueOperation && item.businessTool === row.operation);
+        || row.runId && row.requestId && item.runId === row.runId && item.requestId === row.requestId
+          && (!item.businessTool || item.businessTool === row.operation));
       const eligible = attributed.length ? attributed
         : direct && row.category === "operation" && row.transport !== "cli" ? executions.filter(
           item => item.explicitId || /^(?:browser_run|asp_workbench_)/.test(row.operation)) : [];
@@ -380,26 +445,54 @@ async function scanSource(source, roots, { inDay, until }) {
         row.requestId ||= item.requestId ?? null;
         row.purpose ||= item.purpose;
       }
-      row.evidence.result ||= resultEvidence;
-      if (!direct && !attributed.length) row.resultScope = "outer_call";
+      if (!operation.wrapped || attributed.length || direct && untagged.length) row.evidence.result ||= resultEvidence;
+      if (operation.wrapped && !row.evidence.result) row.resultScope = "outer_call";
       else delete row.resultScope;
       if (direct) {
-        const identity = values.find(value => typeof value?.runId === "string");
+        const identity = untagged.find(value => typeof value?.runId === "string");
         if (identity) row.runId ||= identity.runId;
-        const reported = values.map(value => outcome(value, row.operation, row.transport));
+        const reported = untagged.map(value => outcome(value, row.operation, row.transport));
         if (row.status === "unknown" && (reported.includes("ok") || reported.includes("fail"))) {
           row.status = reported.includes("fail") ? "fail" : "ok";
           row.evidence.state = resultEvidence;
-          row.errorCode = values.find(value => typeof value?.code === "string")?.code;
+          const response = untagged.find(value => typeof value?.code === "string")
+            ?? untagged.find(value => stateSet.has(value?.status) || typeof value?.observationId === "string");
+          row.errorCode = response?.code ?? response?.error?.code;
+          row.observationId ||= response?.observationId;
+          row.blockingExecutions ||= response?.blockingExecutions;
         }
       }
-      if (row.executionId || row.status !== "unknown") delete row.wrapperCallSiteOnly;
+      if (row.executionId || row.status !== "unknown") {
+        delete row.wrapperCallSiteOnly;
+        if (operation.wrapped) row.wrapperExecution = "observed";
+      }
     }
   }
   const rows = [...calls.values()].filter(call => call.selected).flatMap(call => call.rows.map(({ row }) => row));
   for (const row of rows) {
+    if (row.wrapperInvocations?.length === 1) {
+      const invocation = row.wrapperInvocations[0];
+      row.wrapperExecution = invocation.state;
+      if (invocation.state === "observed") {
+        row.runId ||= invocation.runId;
+        row.requestId ||= invocation.requestId;
+        row.executionId ||= invocation.executionId;
+        row.observationId ||= invocation.observationId;
+        row.errorCode ||= invocation.errorCode;
+        row.status = invocation.status;
+        row.evidence.result = invocation.evidence;
+        delete row.wrapperCallSiteOnly;
+      }
+    } else if (row.wrapperInvocations?.length > 1) {
+      row.wrapperExecution = "multiple_invocations";
+      row.evidence.result ||= row.wrapperInvocations[0].evidence;
+      delete row.wrapperCallSiteOnly;
+    }
     const state = states.get(row.executionId);
     if (state && row.category === "operation") applyExecution(row, state, state.evidence);
+    if (row.wrapperCallSiteOnly) row.wrapperExecution ||= row.evidence.wrapper
+      ? row.wrapperConditional ? "conditional_execution_unconfirmed" : "inner_result_unattributed"
+      : "wrapper_result_missing";
   }
   coverage.conflictingExecutionStates = new Set(rows.filter(row => conflicts.has(row.executionId)).map(row => row.executionId)).size;
   return { rows, coverage };
@@ -410,7 +503,13 @@ function applyExecution(row, state, source) {
   if (!["succeeded", "failed"].includes(row.executionState)) row.executionState = state.state;
   row.purpose ||= state.purpose;
   row.observationId ||= state.observationId;
-  if (row.observationId || row.executionId) delete row.wrapperCallSiteOnly;
+  if (row.wrapperCallSiteOnly && (row.observationId || row.executionId)) {
+    delete row.wrapperCallSiteOnly;
+    row.wrapperExecution = "observed";
+  }
+  for (const field of ["startedAt", "finishedAt", "executionStopped", "previousExecutionId"]) {
+    if (state[field] != null) row[field] = state[field];
+  }
   row.errorCode ||= state.errorCode;
   if (state.trace) row.observationTrace = state.trace;
   if (state.networkCapture) row.networkCapture = {
@@ -426,7 +525,7 @@ function applyExecution(row, state, source) {
 export function summarizeOperations(rows) {
   const totals = { total: rows.length, operations: 0, lifecycle: 0, review: 0, sessions: 0,
     status: { ok: 0, fail: 0, unknown: 0 }, operationStatus: { ok: 0, fail: 0, unknown: 0 },
-    byTransport: {}, byOperation: {}, missingResults: 0, wrapperCallSitesOnly: 0, wrapperConditional: 0 };
+    byTransport: {}, byOperation: {}, missingResults: 0, wrapperCallSitesOnly: 0, wrapperConditional: 0, wrapperExecution: {} };
   const sessions = new Set();
   for (const row of rows) {
     const category = row.category === "operation" ? "operations" : row.category;
@@ -437,7 +536,8 @@ export function summarizeOperations(rows) {
     totals.byTransport[row.transport] = (totals.byTransport[row.transport] || 0) + 1;
     operation.total++;
     operation[row.status]++;
-    if (!row.evidence.result) totals.missingResults++;
+    if (!row.evidence.result && row.wrapperExecution !== "condition_not_met") totals.missingResults++;
+    if (row.wrapperExecution) totals.wrapperExecution[row.wrapperExecution] = (totals.wrapperExecution[row.wrapperExecution] || 0) + 1;
     if (row.wrapperCallSiteOnly) totals.wrapperCallSitesOnly++;
     if (row.wrapperConditional) totals.wrapperConditional++;
     sessions.add(`${row.source}\0${row.sessionId}`);
