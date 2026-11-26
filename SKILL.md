@@ -15,6 +15,8 @@ When available, pass the original log path and session ID in `run_begin.sessionS
 
 If the original log path is absent or stale, actively search the client-specific roots in `eval_packet.sessionSearch`. Look for the session ID, then the run ID, task wording and time. Confirm the request and final reply in context before citing line numbers.
 
+On Oracle, run the daily cross-client Browser Eval with `python3 scripts/browser-review-pr.py run --day YYYY-MM-DD` (Hong Kong date). It opens a separate local review session and submits the resulting report as a GitHub pull request for approval. See the [daily review workflow](README.md).
+
 After review, submit reusable fixes, regression cases or documented lessons through a PR to the authorized repository. Include the problem ID, rationale, evidence locators and verification result, and return the PR URL. Keep full session logs local.
 
 Follow the same `problem_id` in `review_history`. Use `review_observe` for later measurements with the actual deployed version and evidence locator.
@@ -62,7 +64,19 @@ When the task includes saving the business record, confirm and save as the page 
 
 ## Finish a run
 
-Poll `run_get` with the execution ID. Before repeating an interrupted action, establish whether the original execution stopped and observe its outcome. After the last write, return the business fields in a separate `purpose: "observe"` execution. Use its observation ID in `run_finish`.
+Keep calls on the same run sequential. When a round returns `queued` or `running`, poll `run_get` with both `runId` and its `executionId` before starting the next operation or calling `run_finish`. For `RUN_BUSY`, use the IDs in `blockingExecutions`. The saved execution records carry `previousExecutionId`, `startedAt`, and `finishedAt`.
+
+For `OUTCOME_UNKNOWN`, query the original execution. If it remains unknown after `executionStopped: true`, use a later same-run observe round to read what happened. Include the original execution ID, that observation ID, and a note in `browser_run.resolutions` before another write. If the result cannot be determined, report it as unresolved and leave the write pending.
+
+After the last write, reopen the exact saved business record in a separate `purpose: "observe"` round. Return the identifying fields and the actual values at the paths declared in `run_begin.criteria`. In `run_finish`, pass `verification: [{ criterionId, observationId }]` for each criterion and use `outcome: "succeeded"` only after the values match. Use `outcome: "unknown"` for unconfirmed results and `outcome: "failed"` for confirmed mismatches. Retain the relevant verification references and describe the mismatch or missing evidence in `note`. Inspect the handoff's `readbacks` for the expected and actual values and observation references.
+
+Omit `decision`, `usedMemoryIds`, and `updates` when handing off without a memory change. For `confirmed`, provide the IDs of memory actually used on the same product edition and site. For `learned` or `corrected`, provide the update, and include the original ID in `usedMemoryIds` when correcting an existing entry.
+
+## Submit valid browser programs
+
+Use the installed Ego API. Pass caller values through `args` and read them from `input`. Run DOM code inside `page.evaluate(callback, input)`; use `await import(...)` for helpers. Keep the browser program as ordinary JavaScript source and pass it as a string, so template interpolation and JSON encoding in the wrapper do not rewrite the source. On `EGO_PROGRAM_CONTRACT`, read `issues` for the line, column and rule, correct the source, and submit the corrected round.
+
+In a Codex `exec` wrapper, use `text({ browserOperation: { operation, runId, requestId }, result })` for each browser tool's returned response. The `operation` is the MCP tool name without the namespace. When a branch skips work, emit `{ browserOperation, skipped: true, reason }` with the same identity. If several call sites use the same operation and their request IDs are computed, add the call site's one-based `operationIndex` in wrapper source order. Use a separate request ID for each iteration. If the wrapper yields a cell ID, use `wait` until its output is collected.
 
 ## Related documents
 

@@ -48,6 +48,9 @@ function createMcpServer(service = createService()) {
     } catch (error) {
       const data = { code: error.code || 'INTERNAL_ERROR', message: error.message,
         ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }),
+        ...(error.runId === undefined ? {} : { runId: error.runId }),
+        ...(error.blockingExecutions === undefined ? {} : { blockingExecutions: error.blockingExecutions }),
+        ...(error.readbacks === undefined ? {} : { readbacks: error.readbacks }),
         ...(error.executionStarted === undefined ? {} : { executionStarted: error.executionStarted }),
         ...(Array.isArray(error.issues) ? { issues: error.issues } : {}) };
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
@@ -89,13 +92,13 @@ function createMcpServer(service = createService()) {
     requestId: text, goal: text, url: z.string().url(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
     domain_tag: domainTag, improvement: improvementLink.optional(), reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
   }, args => service.begin(args));
-  register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
+  register('browser_run', 'Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. Await each same-run round and use run_get with its executionId while queued or running. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text,
     args: z.unknown().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     pageLabel: text.optional(), resumeAfterUserAction: z.boolean().optional(), memo: z.boolean().optional(),
     resolutions: z.array(z.object({ executionId: text, observationId: text, note: text })).optional()
   }, args => service.browserRun(args));
-  register('run_get', 'Read durable run and execution state without replaying commands. Also reconciles completed result files.', {
+  register('run_get', 'Read durable run and execution state without replaying commands. Query the executionId returned by the round or in blockingExecutions. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
   register('run_finish', 'Hand off the execution outcome and its observations for independent evaluation on this MCP server (eval_pending). For a blocker, call with outcome="unknown" and document what prevented verification in note. Success requires a post-action readback. Omit decision and note for a routine handoff. Finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
