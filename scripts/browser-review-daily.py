@@ -24,7 +24,7 @@ def main():
         (directory / "pr.json").write_text(result.stdout)
         message = f"{day} 浏览器 Eval 已在 Oracle 独立评审。GitHub PR 状态为 {receipt['pullRequestState']}。\n{receipt['pullRequest']}"
         changes = receipt["changes"]
-        if changes.get("url"):
+        if changes.get("url") and changes["url"] != receipt["pullRequest"]:
             message += f"\n实现 PR {changes['url']}"
         if changes["blocked"]:
             message += "\n仍有评审意见待处理，详见报告的修改回执。"

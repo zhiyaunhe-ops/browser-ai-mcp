@@ -32,7 +32,7 @@ def ask(state, name, prompt, properties, model):
     return json.loads(result.read_bytes())
 
 
-def prepare(day, state, report, model, previous=None):
+def prepare(day, state, report, model, previous=None, branch=None):
     receipt = state / "changes.json"
     digest = hashlib.sha256(report).hexdigest()
     if previous and not receipt.exists() and previous.get("reviewSha256") == digest:
@@ -48,7 +48,7 @@ def prepare(day, state, report, model, previous=None):
                 raise RuntimeError("实现 PR 已不包含回执中的提交")
         return current
 
-    branch = f"browser-eval/fixes-{day}"
+    branch = branch or f"browser-eval/fixes-{day}"
     owner = REPO.split("/")[0]
     endpoint = f"repos/{REPO}/pulls"
     if previous and previous.get("number"):

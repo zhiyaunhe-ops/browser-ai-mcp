@@ -15,10 +15,10 @@ import sys
 from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
 
 
-from browser_review_changes import prepare
+from browser_review_changes import REPO, prepare
 
 
-DEFAULT_REPOSITORY = "zhiyaunhe-ops/browser-ai-memory"
+DEFAULT_REPOSITORY = REPO
 COLLECTOR = Path(__file__).resolve().with_name("browser-operation-collector.mjs")
 GITHUB_API = ["gh", "api", "--hostname", "github.com"]
 PR_BODY = "请审批当天的浏览器操作评审和对应修改。逐项处理情况、实现 PR 及未决事项见 Files changed。"
@@ -225,7 +225,7 @@ def open_pr(pull_request, base):
     return pull_request
 
 
-def publish(day, state, repository, base, supplied_report=None, revision=None):
+def publish(day, state, repository, base, supplied_report=None, revision=None, branch=None):
     report = state / "review.md"
     content = report_content(supplied_report or report)
     if report.exists() and report.read_bytes() != content:
@@ -234,7 +234,7 @@ def publish(day, state, repository, base, supplied_report=None, revision=None):
         save(report, content)
 
     remote = f"https://github.com/{repository}.git"
-    branch = f"browser-review/{day}"
+    branch = branch or f"browser-review/{day}"
     branch_ref = f"refs/heads/{branch}"
     report_path = f"reviews/browser/{day}.md"
 
@@ -292,7 +292,7 @@ def publish(day, state, repository, base, supplied_report=None, revision=None):
             if old_content == content:
                 return verify_pr(existing)
             head = command(git + ["rev-parse", "FETCH_HEAD"]).stdout.decode().strip()
-            if old_content is None or head != revision["head"]:
+            if head != revision["head"]:
                 raise RuntimeError("同日 PR 分支已有其他改动，本地修订仍保留")
             commit_report(update=True)
             current = open_pr(find_pr(repository, branch), base)
@@ -354,7 +354,7 @@ def publish_with_changes(day, state, repository, base, model, supplied=None, rev
         prior = (root / pointer.read_text() if pointer.exists() else root) / "changes.json"
         if prior.exists():
             previous = json.loads(prior.read_bytes())
-    changes = prepare(day, state, content, model, previous)
+    changes = prepare(day, state, content, model, previous, revision.get("branch") if revision and repository == REPO else None)
     summary = changes["summary"]
     if changes.get("url"):
         summary += f"\n\n[实现 PR]({changes['url']}) · `{changes['commit']}`"
@@ -363,10 +363,22 @@ def publish_with_changes(day, state, repository, base, model, supplied=None, rev
     delivered = state / "delivery"
     delivered.mkdir(exist_ok=True)
     report = delivered / "review.md"
-    save(report, content.rstrip() + ("\n\n## 按评审意见修改\n\n" + summary + "\n").encode())
+    if not report.exists():
+        save(report, content.rstrip() + ("\n\n## 按评审意见修改\n\n" + summary + "\n").encode())
+    branch = revision.get("branch") if revision else None
+    if repository == REPO and changes.get("number"):
+        combined = json.loads(command(GITHUB_API + [
+            f"repos/{repository}/pulls/{changes['number']}"
+        ]).stdout)
+        branch = combined["head"]["ref"]
+        if revision and revision["number"] != combined["number"]:
+            raise RuntimeError("本轮修改与报告指向不同 PR")
+        # prepare may have advanced the shared branch with this revision's changes.
+        if combined["head"]["sha"] == changes["commit"]:
+            revision = {"number": combined["number"], "head": changes["commit"]}
     if not revision:
         # Upgrade an existing report-only PR only when its head still contains the exact original.
-        existing = find_pr(repository, f"browser-review/{day}")
+        existing = find_pr(repository, branch or f"browser-review/{day}")
         if existing and existing["state"] == "open":
             head = existing["head"]["sha"]
             item = json.loads(command(GITHUB_API + [
@@ -374,13 +386,21 @@ def publish_with_changes(day, state, repository, base, model, supplied=None, rev
             ]).stdout)
             if base64.b64decode(item["content"]) == content:
                 revision = {"number": existing["number"], "head": head}
-    pr = publish(day, delivered, repository, base, revision=revision)
+    pr = publish(day, delivered, repository, base, revision=revision, branch=branch)
     return pr, report, changes
 
 
 def refresh(day, state, repository, base, model):
     pending = state / "pending-refresh.json"
-    existing = open_pr(find_pr(repository, f"browser-review/{day}"), base)
+    branch = f"browser-review/{day}"
+    pointer = state / "current-revision"
+    receipt = (state / pointer.read_text() if pointer.exists() else state) / "changes.json"
+    if repository == REPO and receipt.exists():
+        number = json.loads(receipt.read_bytes()).get("number")
+        if number:
+            combined = json.loads(command(GITHUB_API + [f"repos/{repository}/pulls/{number}"]).stdout)
+            branch = combined["head"]["ref"]
+    existing = open_pr(find_pr(repository, branch), base)
     if pending.exists():
         revision = json.loads(pending.read_bytes())
         target = (repository, base, existing["number"])
@@ -389,7 +409,7 @@ def refresh(day, state, repository, base, model):
     else:
         revision_dir = Path(mkdtemp(prefix="revision-", dir=state))
         revision = {
-            "directory": revision_dir.name, "repository": repository, "base": base,
+            "directory": revision_dir.name, "repository": repository, "base": base, "branch": branch,
             "number": existing["number"], "head": existing["head"]["sha"],
         }
         save(pending, json.dumps(revision).encode())
