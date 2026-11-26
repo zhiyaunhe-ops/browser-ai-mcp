@@ -71,7 +71,7 @@ function applyMemory(service, item, update) {
   if (review?.runId !== run.runId) throw invalid('The memory change requires the evaluation of the source run.');
   const handoff = [run.feedback, ...(run.feedbackHistory || [])].find(feedback => feedback?.requestId === review.reviewKey);
   if (!handoff) throw invalid('The evaluated handoff is unavailable.');
-  const evidence = new Set([...review.evidenceIds, ...review.criterionResults.flatMap(row => row.evidenceIds)]);
+  const evidence = new Set([...review.evidenceIds, ...(review.toolChoice?.evidenceIds ?? []), ...review.criterionResults.flatMap(row => row.evidenceIds)]);
   const [memoryId] = service.memory.applyUpdates(run, [update], [...evidence], handoff.outcome);
   const { revision } = service.memory.get(memoryId);
   return { kind: 'memory', version: memoryId + '@' + revision, memoryId, revision };

@@ -92,6 +92,7 @@ def attempt_order(attempt):
 
 def evidence_refs(con, run_id, assessment):
     references = dict.fromkeys(assessment["evidenceIds"])
+    references.update(dict.fromkeys(assessment.get("toolChoice", {}).get("evidenceIds", [])))
     for criterion in assessment["criterionResults"]:
         references.update(dict.fromkeys(criterion["evidenceIds"]))
     evidence = []
@@ -145,6 +146,9 @@ def browser_attempts(path, observations_path, problem_id, attempt_id):
             handoff = json.loads(row["handoff"]) if row["handoff"] else {}
             assessment = {field: review[field] for field in
                           ("reviewerModel", "verdict", "criterionResults", "evidenceIds", "summary")}
+            if "toolChoice" in review:
+                assessment["toolChoice"] = review["toolChoice"]
+                assessment["sessionRefs"] = review.get("sessionRefs", [])
             attempts.append({
                 "source": "browser", "attempt_id": row["attempt_id"], "problem_id": key,
                 "domain_tag": row["product_domain"] or review.get("domain_tag"),

@@ -25,9 +25,14 @@ const memory = z.object({
 });
 const sessionSource = z.object({ path: text, sessionId: text, startLine: z.number().int().positive().optional() });
 const sessionRefs = z.array(z.object({ path: text, sessionId: text, line: z.number().int().positive(), commit: text.optional() })).max(30);
+const toolChoice = z.object({
+  status: z.enum(['reasonable', 'improvable', 'insufficient_evidence']),
+  reason: text, evidenceIds: ids,
+  alternative: text.optional().describe('For improvable, name the verified available tool and the specific step it supports.')
+});
 const assessment = {
   reviewerModel: text, verdict, criterionResults: z.array(criterionResult).max(30), evidenceIds: ids, summary,
-  memory: memory.optional()
+  memory: memory.optional(), toolChoice: toolChoice.optional()
 };
 const deliveryHint = 'For actionable findings call review_improve, implement the change, use review_apply, and re-evaluate the delivered version in a fresh run. For a reusable fix, regression case or documented lesson, open a PR on the authorized repository. Include the problem ID, change rationale, evidence locators and verification result, and return the PR URL. Keep the full session log local.';
 const memoryOrigin = z.enum(['run_begin', 'eval_submit']);
@@ -82,6 +87,15 @@ function submit(service, input) {
     if (assessment.memory && run.domain_tag) assessment.memory = { ...assessment.memory, domain_tag: run.domain_tag };
     const results = assessment.criterionResults;
     const references = new Set([...assessment.evidenceIds, ...results.flatMap(row => row.evidenceIds)]);
+    const route = assessment.toolChoice;
+    if (route?.status === 'improvable' && !route.alternative?.trim()) {
+      throw error('EVAL_TOOL_CHOICE', 'Identify the available alternative for the specific step.');
+    }
+    if (route && route.status !== 'insufficient_evidence' && !route.evidenceIds.length && !sessionRefs?.length) {
+      throw error('EVAL_EVIDENCE', 'Cite evidence from the run or session lines for the tool choice.');
+    }
+    const businessReferences = new Set(references);
+    for (const id of route?.evidenceIds ?? []) references.add(id);
     const readbacks = new Set();
     for (const id of references) {
       const observation = service.store.get('observation', id);
@@ -91,7 +105,7 @@ function submit(service, input) {
       }
       const sequence = observation?.runId === runId ? observation.sequence :
         record.kind === 'observation' ? record.payload.sequence : null;
-      if (sequence > (run.lastWriteSequence || 0)) readbacks.add(id);
+      if (businessReferences.has(id) && sequence > (run.lastWriteSequence || 0)) readbacks.add(id);
     }
     if ((assessment.verdict === 'pass' && !readbacks.size) ||
         results.some(row => row.verdict === 'met' && !row.evidenceIds.some(id => readbacks.has(id)))) {
@@ -161,7 +175,7 @@ function registerEvaluationTools(register, service) {
       rounds: z.array(z.object({ executionId: text, sequence: z.number(),
         purpose: text, state: text, observationId: text.optional(), businessTool: text.optional(),
         result: z.unknown(), error: z.unknown(), networkCapture: z.unknown() })), gaps: z.array(z.record(z.unknown())), ...pagination }));
-  register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。证据不足可标记 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。可执行问题填 improvements，随评估创建具体改进项。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
+  register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。成功与失败都填写 toolChoice，独立判定工具选择。给出分步理由和 evidenceIds 或 sessionRefs；improvable 须指出当时可用且获准的替代工具及适用步骤。证据不足填 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。可执行问题填 improvements，随评估创建具体改进项。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
     ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment, sessionRefs: sessionRefs.optional(), improvements: z.array(proposal).max(20).optional()
   }, args => submit(service, args), report);
   register('run_summary', '读取运行结果、评估进度及独立模型已提交的结构化总结。', runId, args => {

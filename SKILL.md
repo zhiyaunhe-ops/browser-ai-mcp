@@ -11,7 +11,7 @@ For ASP UAT workbench service navigation use `asp_workbench_open_node`. For ente
 
 ## Review a run on the same machine
 
-When available, pass the original log path and session ID in `run_begin.sessionSource`. After handoff, a reviewer on the same data directory calls `eval_pending`, then `eval_packet`. Use `eval_session_context` to check user corrections and the final claim against the browser evidence. Submit the verdict using `eval_submit` with browser evidence IDs and session line references. Record missing evidence as `insufficient_evidence`.
+When available, pass the original log path and session ID in `run_begin.sessionSource`. After handoff, a reviewer on the same data directory calls `eval_pending`, then `eval_packet`. Use `eval_session_context` to check user corrections and the final claim against the browser evidence. Submit the verdict using `eval_submit` with browser evidence IDs and session line references. Record missing evidence as `insufficient_evidence`. For every outcome, submit `toolChoice` separately from the business verdict. Cite run evidence or session lines. Mark a step `improvable` only when a more direct tool supported that step and was available and authorized at the time. A verified YonBuilder lookup supports a finding about discovery only. Account for UI verification requested by the user.
 
 If the original log path is absent or stale, actively search the client-specific roots in `eval_packet.sessionSearch`. Look for the session ID, then the run ID, task wording and time. Confirm the request and final reply in context before citing line numbers.
 
