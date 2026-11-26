@@ -38,6 +38,11 @@ function small(value, limit = 14000) {
   const text = JSON.stringify(value);
   return text && text.length > limit ? { truncated: true, preview: text.slice(0, limit) } : value;
 }
+function executionReference({ executionId, state, executionStopped, startedAt, finishedAt }) {
+  return { executionId, state, executionStopped, startedAt, finishedAt };
+}
+const inProgress = execution => ['queued', 'running'].includes(execution.state);
+
 function valueAt(value, field) {
   for (const key of field ? field.split('.') : []) {
     if (value === null || typeof value !== 'object' || !Object.hasOwn(value, key)) return { found: false };
@@ -118,14 +123,15 @@ class BrowserService {
     if (!current) return 'not_ready';
     return run.reviewId ? 'reviewed' : 'pending';
   }
-  criterionReadbacks(run) {
+  criterionReadbacks(run, verification = run.feedback?.verification ?? []) {
     return run.criteria.map(criterion => {
-      const ref = run.feedback.verification.find(v => v.criterionId === criterion.id);
+      const target = { criterionId: criterion.id, path: criterion.path, expected: small(criterion.equals) };
+      const ref = verification.find(v => v.criterionId === criterion.id);
       const observation = ref && this.store.get('observation', ref.observationId);
-      if (!observation || observation.runId !== run.runId) return { criterionId: criterion.id, found: false };
+      if (!observation || observation.runId !== run.runId) return { ...target, found: false };
       const { found, value } = valueAt(observation.value, criterion.path);
-      return { criterionId: criterion.id, observationId: observation.observationId, found,
-        afterLastWrite: observation.sequence > (run.lastWriteSequence || 0),
+      return { ...target, observationId: observation.observationId, executionId: observation.executionId,
+        observedAt: observation.observedAt, found, afterLastWrite: observation.sequence > (run.lastWriteSequence || 0),
         ...(found ? { actual: small(value), matchesExpected: isDeepStrictEqual(value, criterion.equals) } : {}) };
     });
   }
@@ -241,7 +247,10 @@ class BrowserService {
       if (!['execute', 'observe'].includes(args.purpose)) throw problem('INVALID_ARGUMENT', 'purpose must be execute or observe');
       if (args.timeoutMs !== undefined && (!Number.isInteger(args.timeoutMs) || args.timeoutMs < 1000 || args.timeoutMs > 120000)) throw problem('INVALID_ARGUMENT', 'timeoutMs must be between 1000 and 120000');
       const previous = this.executions(run.runId);
-      if (previous.some(e => ['queued', 'running'].includes(e.state))) throw problem('RUN_BUSY', 'An execution is already running; query run_get');
+      const active = previous.filter(inProgress);
+      if (active.length) throw problem('RUN_BUSY', 'Wait for the listed execution to stop using run_get with its executionId', {
+        runId: run.runId, blockingExecutions: active.map(executionReference)
+      });
       if (args.businessTool) {
         const domainTag = resolveDomainTag({ goal: run.goal, domain_tag: args.domain_tag, business_tool: args.businessTool,
           node_name: args.args?.nodeName, document_name: args.args?.documentName, document_path: args.args?.documentPath });
@@ -265,7 +274,11 @@ class BrowserService {
         this.record(run, execution.executionId, 'incident', { type: 'outcome-resolution', ...value });
       }
       const unknown = previous.filter(e => e.state === 'outcome_unknown' && !e.resolution);
-      if (unknown.some(e => !e.executionStopped) || unknown.length && args.purpose !== 'observe') throw problem('OUTCOME_UNKNOWN', 'Resolve the prior execution before another write; query run_get and capture a later observation once stopped');
+      if (unknown.some(e => !e.executionStopped) || unknown.length && args.purpose !== 'observe') {
+        throw problem('OUTCOME_UNKNOWN', 'Query run_get for each unresolved execution. Once stopped, record a later same-run observation before another write', {
+          runId: run.runId, blockingExecutions: unknown.map(executionReference)
+        });
+      }
       // Reject definite SDK/context mistakes before dispatch or write sequencing.
       // Request deduplication above still returns an existing invocation unchanged.
       const programCheck = assertProgram(args.code);
@@ -274,6 +287,7 @@ class BrowserService {
       const pageRules = args.memo === false ? [] : this.memory.pageRules(new URL(run.url), run.domain_tag);
       const execution = { executionId, runId: run.runId, requestId: args.requestId, state: 'queued',
         sequence: ++run.sequence, purpose: args.purpose, code: args.code, args: args.args ?? null,
+        ...(previous.length ? { previousExecutionId: previous.at(-1).executionId } : {}),
         ...edition(run.domain_tag),
         ...(args.businessTool ? { businessTool: args.businessTool } : {}),
         timeoutMs: args.timeoutMs || 30000, spaceId: run.spaceId, name: run.name,
@@ -397,6 +411,7 @@ class BrowserService {
     const { finishArguments, recalledMemory, ...publicRun } = run;
     return { ...publicRun, recalledMemory: this.recalledForEdition(run),
       reviewState: this.reviewState(run), executionCount, executions: executions.map(e => this.executionView(e)),
+      ...(run.feedback ? { readbacks: this.criterionReadbacks(run) } : {}),
       ...records, records: records.records.map(r => ({ ...edition(run.domain_tag), ...r, payload: small(r.payload) })),
       gaps: this.gaps(run.runId, args.executionId) };
   }
@@ -429,18 +444,21 @@ class BrowserService {
       if (!['confirmed', 'corrected', 'learned', 'no-change'].includes(args.decision)) throw problem('INVALID_ARGUMENT', 'Invalid memory decision');
       required(args.note, 'note');
       const executions = this.executions(run.runId);
-      if (executions.some(e => ['queued', 'running'].includes(e.state)) || executions.some(e => e.state === 'outcome_unknown' && !e.executionStopped)) throw problem('RUN_BUSY', 'An execution has not been confirmed stopped');
+      const blocking = executions.filter(e => inProgress(e) || e.state === 'outcome_unknown' && !e.executionStopped);
+      if (blocking.length) throw problem('RUN_BUSY', 'Wait for the listed execution to stop before handing off the run', {
+        runId: run.runId, blockingExecutions: blocking.map(executionReference)
+      });
       const verification = args.verification || [];
       const evidenceIds = [];
       if (args.outcome === 'succeeded') {
-        if (!run.criteria.length) throw problem('VERIFICATION_REQUIRED', 'Successful completion requires declared criteria');
-        for (const criterion of run.criteria) {
-          const reference = verification.find(v => v.criterionId === criterion.id);
-          const observation = reference && this.store.get('observation', reference.observationId);
-          if (!observation || observation.runId !== run.runId || observation.sequence <= (run.lastWriteSequence || 0)) throw problem('VERIFICATION_REQUIRED', 'Provide an independent observation after the last execute round for each criterion');
-          const observed = valueAt(observation.value, criterion.path);
-          if (!observed.found || !isDeepStrictEqual(observed.value, criterion.equals)) throw problem('VERIFICATION_FAILED', `Observed value does not satisfy ${criterion.id}`);
-          evidenceIds.push(observation.observationId);
+        if (!run.criteria.length) throw problem('VERIFICATION_REQUIRED', 'Successful completion requires criteria declared in run_begin');
+        const readbacks = this.criterionReadbacks(run, verification);
+        for (const readback of readbacks) {
+          if (!readback.afterLastWrite) throw problem('VERIFICATION_REQUIRED',
+            `Provide an independent observation after the last write for ${readback.criterionId}`, { runId: run.runId, readbacks });
+          if (!readback.matchesExpected) throw problem('VERIFICATION_FAILED',
+            `Observed value does not satisfy ${readback.criterionId}`, { runId: run.runId, readbacks });
+          evidenceIds.push(readback.observationId);
         }
       } else if (args.outcome !== 'unknown') evidenceIds.push(...executions.map(e => e.executionId));
       const used = args.usedMemoryIds || [];

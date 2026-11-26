@@ -54,7 +54,7 @@ function frameSpan(buffer, start) {
 
 export function readSession(file, coverage) {
   const buffer = fs.readFileSync(file);
-  if (!file.endsWith(".zstd")) return buffer.toString("utf8");
+  if (!/\.zs(?:t|td)$/i.test(file)) return buffer.toString("utf8");
   if (typeof zlib.zstdDecompressSync !== "function") throw new Error("This Node runtime does not provide zstdDecompressSync");
   const chunks = [], magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
   for (let cursor = 0; cursor < buffer.length;) {

@@ -140,6 +140,28 @@ npm ci
 3. 评估 AI 提交新运行的 `eval_submit`。同一版本满足验收条件并有对应回读后，该项进入 `verified`。失败或证据不足会留下尝试记录，状态保留为 `applied`；修订交付物时传当前 `expectedVersion`，再按新版本复验。
 4. 通过 PR 交付可复用改动，附上问题编号、版本和复验运行。后续多个真实案例的效果，可继续用 `review_observe` 跟踪。
 
+### Oracle 每日浏览器操作评审
+
+在 Oracle 上使用有权读取浏览器操作记录的账号运行。需要 Python 3、Node.js、本机已登录的 Codex CLI，以及有目标仓库写权限的 GitHub CLI。Oracle 定时入口 `scripts/browser-review-daily.py` 在香港时间 09:00 和 21:00 处理上一完整日，晚间沿用当日 PR 或补交缺报。它通过本机 `yonclaw-result` 发送普通结果通知。每日窗口按香港日历计算，可用 `TZ=Asia/Hong_Kong date -d yesterday +%F` 取得前一天。
+
+```sh
+python3 scripts/browser-review-pr.py run --day 2026-11-25
+```
+
+首轮运行时，Oracle 采集当日记录并启动独立的只读 Codex 会话评审。评审完成后，同一轮落实有证据支持的修改，将代码差异、逐项处理结果和报告一并提交到 `zhiyaunhe-ops/browser-ai-mcp` 的同一条 PR，等待人工审批。当天没有代码修改时，单独提交报告。报告位于 `reviews/browser/YYYY-MM-DD.md`。原始证据和会话日志保留在 Oracle。
+
+```sh
+python3 scripts/browser-review-pr.py collect --day 2026-11-25
+python3 scripts/browser-review-pr.py review --day 2026-11-25
+python3 scripts/browser-review-pr.py publish --day 2026-11-25
+```
+
+`collect` 返回本地证据包路径，`review` 返回本地报告路径，`publish` 返回 PR 链接、状态和提交号。已经由另一个独立会话准备好报告时，可直接执行 `publish --day 2026-11-25 --report /absolute/path/to/review.md`。报告应为 UTF-8 Markdown，以一级标题开头，只写归纳结论和非敏感证据定位。
+
+默认状态目录为 `~/.local/state/browser-ai-mcp/reviews/YYYY-MM-DD`，设置 `XDG_STATE_HOME` 或传入 `--state-dir` 可改变存放位置。同一天重跑会沿用已保存的证据和报告。推送后创建 PR 失败时，用相同日期重跑 `publish` 即可继续。已有同日 PR 时返回它的状态和链接。现存远端报告与本地文件不一致时，脚本保留本地报告并报告冲突。
+
+采集来源补齐后，可用 `python3 scripts/browser-review-pr.py refresh --day 2026-11-25` 对同日重新采集和独立评审。刷新仅适用于已有开放 PR。旧证据和报告保留在本机，新报告以快进提交更新同一条 PR，随后回读 PR 提交和报告。刷新中断时，重跑相同命令会继续待完成的修订。刷新成功后，日常命令沿用最新核实的修订。
+
 ### 记录请求与复用
 
 每个浏览器执行轮次自动收集所操作页面的 XHR 和 Fetch 请求。用 `run_get` 查看本轮的 `networkCapture`。用 `evidence_query` 传入同一个 `runId`、`executionId` 和 `view: "api"` 可看方法、路径、查询参数名、请求体结构及响应状态。草稿的 `requestEvidence` 带回请求样本和证据 ID。样本超过 30 条时，用原任务的 `evidence_query` 翻页读取其余记录。下次任务命中这条流程记忆或页面提醒时，可以用返回的 `sourceRunId` 查回当时的请求。
@@ -247,3 +269,4 @@ ASP 超级版 UAT 的 `asp_ui_template_update_field` 使用当前已登录的 Al
 
 - [安装与客户端配置](install.md)
 - [Agent 操作指南和脚本示例](SKILL.md)
+- [浏览器 Eval · 2026-11-25](reviews/browser/2026-11-25.md)

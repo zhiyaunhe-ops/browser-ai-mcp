@@ -100,8 +100,8 @@ async function updateTemplateField(service, input) {
     const verified = sameField(actual, identity, fieldNid) && actual.matches === true;
     const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
     await finish(verified ? 'succeeded' : 'failed', verified ? 'Read the field model in a fresh designer' :
-      'Reopened designer did not show the requested properties', verified ? verification : []);
-    return { ...runScope, ...identity, designerUrl, before, after: actual.values, properties: actual.properties,
+      'Reopened designer did not show the requested properties', verification);
+    return { ...runScope, ...identity, designerUrl, before, expected: desired, after: actual.values, properties: actual.properties,
       verified, observationId: observed.observationId,
       status: verified ? write?.result?.changed ? 'updated' : write ? 'verified' :
         Object.keys(desired).length ? 'already_set' : 'inspected' : 'verification_failed',
@@ -128,8 +128,8 @@ async function updateTemplateField(service, input) {
   const verified = sameField(actual, identity, fieldNid) && actual.required === required;
   const verification = criteria.map(c => ({ criterionId: c.id, observationId: observed.observationId }));
   await finish(verified ? 'succeeded' : 'failed', verified ? 'Reopened template and read the requested field' :
-    'Reopened template did not show the requested property', verified ? verification : []);
-  return { ...runScope, ...identity, designerUrl, before, after: actual.required ?? null, verified, observationId: observed.observationId,
+    'Reopened template did not show the requested property', verification);
+  return { ...runScope, ...identity, designerUrl, before, expected: required, after: actual.required ?? null, verified, observationId: observed.observationId,
     status: verified ? write?.result?.changed ? 'updated' : before === required ? 'already_set' : 'verified' : 'verification_failed',
     ...(write?.result?.savePost ? { savePost: write.result.savePost } : {}),
     ...(write?.error ? { writeError: write.error.message } : {}) };
