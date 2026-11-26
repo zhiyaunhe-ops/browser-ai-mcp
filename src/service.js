@@ -30,6 +30,12 @@ const fingerprint = value => crypto.createHash('sha256').update(JSON.stringify(c
 const finishBody = args => ({ outcome: args.outcome, decision: args.decision, note: args.note,
   verification: args.verification || [], usedMemoryIds: args.usedMemoryIds || [],
   updates: args.updates || [], keepPages: args.keepPages || [] });
+function archiveHandoff(run) {
+  if (run.feedback) run.feedbackHistory = [...(run.feedbackHistory || []),
+    { ...run.feedback, ...(run.reviewId ? { reviewId: run.reviewId } : {}) }];
+  delete run.feedback;
+  delete run.reviewId;
+}
 function required(value, field) {
   if (typeof value !== 'string' || !value.trim()) throw problem('INVALID_ARGUMENT', `${field} is required`);
   return value;
@@ -123,6 +129,43 @@ class BrowserService {
     if (!current) return 'not_ready';
     return run.reviewId ? 'reviewed' : 'pending';
   }
+  async canSnapshotExecution(execution) {
+    if (this.pending.has(execution.executionId)) return false;
+    if (execution.state === 'queued') {
+      if (!Number.isSafeInteger(execution.ownerPid) || execution.ownerPid < 1) return false;
+      try { process.kill(execution.ownerPid, 0); }
+      catch (error) { return error.code === 'ESRCH'; }
+      return false;
+    }
+    // The adapter inspects the original invocation artifacts. No refresh, dispatch or cleanup.
+    const recovered = await this.ego.recover?.(execution);
+    return recovered?.executionStopped === true && recovered.state !== 'running';
+  }
+
+  async pendingReviews(cursor, limit, domainTag) {
+    const idleBefore = this.now() - 30 * 60 * 1000;
+    for (const candidate of this.store.handoffCandidates(idleBefore, domainTag)) {
+      if (this.reviewState(candidate) !== 'not_ready') continue;
+      const unsettled = this.store.unsettledExecutions(candidate.runId);
+      const stopped = await Promise.all(unsettled.map(execution => this.canSnapshotExecution(execution)));
+      if (stopped.includes(false)) continue;
+      this.store.transaction(() => {
+        const run = this.run(candidate.runId);
+        if (run.sequence !== candidate.sequence || run.updatedAt !== candidate.updatedAt || run.state !== candidate.state ||
+          run.domain_tag !== candidate.domain_tag || this.reviewState(run) !== 'not_ready' ||
+          !isDeepStrictEqual(unsettled, this.store.unsettledExecutions(run.runId))) return;
+        archiveHandoff(run);
+        const note = run.state === 'awaiting_user' ? 'Execution paused for user action before run_finish.' :
+          'No run_finish after 30 minutes without execution activity.';
+        run.feedback = { requestId: `auto-handoff:${this.id()}`, sequence: run.sequence, source: 'eval_pending',
+          outcome: 'unknown', verification: [], usedMemoryIds: [], changedMemoryIds: [], note, submittedAt: this.now() };
+        this.store.put('run', run.runId, run);
+        this.record(run, null, 'incident', { type: 'run-feedback', ...run.feedback });
+      });
+    }
+    return this.store.pendingReviews(cursor, limit, domainTag);
+  }
+
   criterionReadbacks(run, verification = run.feedback?.verification ?? []) {
     return run.criteria.map(criterion => {
       const target = { criterionId: criterion.id, path: criterion.path, expected: small(criterion.equals) };
@@ -343,6 +386,8 @@ class BrowserService {
         isDeepStrictEqual(execution.observationTrace ?? null, result.observationTrace ?? null) &&
         isDeepStrictEqual(execution.networkCapture ?? null, networkCapture)) return;
       const run = this.run(execution.runId);
+      // Materialized results can arrive for an abandoned execution at the same sequence.
+      if (run.feedback?.source === 'eval_pending') archiveHandoff(run);
       if (!execution.networkCapture && Array.isArray(networkRecords)) for (const payload of networkRecords) {
         this.record(run, executionId, 'network', payload, 'ego-page');
       }
@@ -477,9 +522,11 @@ class BrowserService {
       if (['corrected', 'learned'].includes(args.decision) !== (updates.length > 0)) throw problem('INVALID_MEMORY', 'learned/corrected require updates; confirmed/no-change do not accept them');
       for (const update of updates) if (update.memoryId && !used.includes(update.memoryId)) throw problem('INVALID_MEMORY', 'Corrections must identify the used memory');
       const changedMemoryIds = this.memory.applyUpdates(run, updates, evidenceIds, args.outcome);
-      if (run.feedback) run.feedbackHistory = [...(run.feedbackHistory || []),
-        { ...run.feedback, ...(run.reviewId ? { reviewId: run.reviewId } : {}) }];
-      delete run.reviewId;
+      if ([run.feedback, ...(run.feedbackHistory || [])].some(feedback =>
+        feedback?.source === 'eval_pending' && feedback.requestId === args.requestId)) {
+        throw problem('REQUEST_CONFLICT', 'Use a new requestId to replace the recovered handoff.');
+      }
+      archiveHandoff(run);
       run.feedback = { requestId: args.requestId, sequence: run.sequence, outcome: args.outcome, decision: args.decision,
         verification, note: args.note, usedMemoryIds: used, recalledMemoryIds: recalled,
         changedMemoryIds, resolvedUnknownExecutions: args.outcome === 'succeeded' ? executions.filter(e => e.state === 'outcome_unknown').map(e => e.executionId) : [],
@@ -487,7 +534,8 @@ class BrowserService {
       run.outcome = args.outcome;
       run.finishArguments = finishBody(args);
       if (args.outcome === 'unknown') {
-        run.state = 'needs_verification'; run.cleanup = { state: 'not_requested' };
+        if (run.state !== 'awaiting_user') run.state = 'needs_verification';
+        run.cleanup = { state: 'not_requested' };
       } else if (run.spaceId == null) {
         run.state = args.outcome === 'succeeded' ? 'completed' : args.outcome;
         run.cleanup = { state: 'not_needed' };

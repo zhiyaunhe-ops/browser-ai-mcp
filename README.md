@@ -52,6 +52,8 @@ npm ci
 
 评估 AI 连接同一台机器上的 Browser MCP，指向执行方使用的数据目录。MCP 内置 Toolkit 的评估规则和历史查询，执行方可以在 `run_begin` 传入 `sessionSource`，例如 `{"path":"/absolute/path/session.jsonl","sessionId":"session-1","startLine":42}`。
 
+执行卡住时，在向用户求助或给最终答复前调用 `run_finish`，传 `outcome: "unknown"`，在 `note` 中写明阻塞、最后观察到的结果和剩余验收条件。对于漏交的运行，查询待办会将等待用户的运行或闲置 30 分钟的运行交接为结果未知；评估方应先核对会话和业务回读。
+
 1. 调用 `eval_pending` 获取待评估的 `runId`，也可直接使用执行方交来的 `runId`。
 2. 调用 `eval_packet({runId})` 读取目标、验收条件、操作轮次、回读结果和采集缺口。`readbacks` 单独列出验收字段的实际值及观察是否晚于最后一次执行。翻页检查 `rounds` 时传回首页的 `reviewKey` 和上一页的 `nextCursor`，需要请求细节时用 `evidence_query`。
 3. 如果业务问题涉及用户原话、纠正或最终答复，从包里的 `sessionSource` 或已知日志路径调用 `eval_session_context({path,startLine,limit})`。按 `nextLine` 翻页，在提交的 `sessionRefs` 里写明 `path`、`sessionId`、`line` 和已知的 `commit`；缺失或截断处须说明证据缺口。
