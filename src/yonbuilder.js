@@ -1,5 +1,7 @@
 'use strict';
 
+const { readSchema } = require('./schema');
+
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
@@ -116,8 +118,8 @@ return info;` });
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 
-  register('yonbuilder_cli', 'Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some commands write live data.',
-    { entry: z.enum(['bip-cli', 'erm']), argv: z.array(z.string()).min(1) }, a => invoke(a.entry, a.argv));
+  register('yonbuilder_cli', 'Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
+    { entry: z.enum(['bip-cli', 'erm', 'schema']), argv: z.array(z.string()).min(1) }, a => a.entry === 'schema' ? readSchema(a.argv) : invoke(a.entry, a.argv));
   const target = { ...environment, microservice: word, bill: word, template: word, field: word };
   const fields = a => ({ 'microservice-code': a.microservice, 'bill-no': a.bill, 'tpl-id': a.template, field: a.field });
   register('yonbuilder_field_get', 'Read all exact-name field matches on a template.', target, async a => {
