@@ -24,3 +24,28 @@ test('YonBuilder scopes reads, disambiguates pages and builds a dry-run preview'
   assert.equal((await tools.get('yonbuilder_field_get')(field)).count,1);
   assert.equal((await tools.get('yonbuilder_field_preview')({...field,group:'group',property:'visible',value:'false'})).dryRun,true);
 });
+
+test('a tenant-scoped CLI query checks its session before dispatch', async () => {
+  const tools = new Map();
+  const calls = [];
+  const argv = ['template', 'importtpl', 'list', '--session-id', 'example-session'];
+  const probe = ['whoami', '--format', 'json', '--session-id', 'example-session'];
+  let identity = { tenantid: 'tenant-b' };
+  registerYonbuilder((name, description, schema, call) => tools.set(name, call), {}, async (entry, args) => {
+    assert.equal(entry, 'bip-cli');
+    calls.push(args);
+    return args[0] === 'whoami' ? identity : ['example-template'];
+  });
+  const query = tools.get('yonbuilder_cli');
+  const request = { entry: 'bip-cli', argv, targetTenantId: 'tenant-a' };
+  await assert.rejects(query(request), { code: 'TENANT_MISMATCH' });
+  assert.deepEqual(calls.splice(0), [probe]);
+  identity = {};
+  await assert.rejects(query(request), { code: 'TENANT_UNKNOWN' });
+  assert.deepEqual(calls.splice(0), [probe]);
+  identity = { tenantid: 'tenant-a' };
+  assert.deepEqual(await query(request), ['example-template']);
+  assert.deepEqual(calls.splice(0), [probe, argv]);
+  await query({ entry: 'bip-cli', argv });
+  assert.deepEqual(calls, [argv]);
+});
