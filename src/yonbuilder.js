@@ -88,6 +88,9 @@ function registerYonbuilder(register, service, invoke = cli) {
     } catch (error) {
       if (a.appId) throw error;
     }
+    if (a.appId && a.appCode && item && item.appCode !== a.appCode) {
+      fail('APP_MISMATCH', 'The requested appId and appCode identify different applications.');
+    }
     if (!a.appId && item?.appCode !== a.appCode) {
       item = (await listApps(selected, { full: true })).apps.find(candidate => candidate.appCode === a.appCode);
     }
@@ -123,10 +126,17 @@ return info;` });
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 
-  register('yonbuilder_cli', '核对当前角色可见的费控菜单和入口先查 workbench service list。Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
+  register('yonbuilder_cli', 'Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. metadata find --biz-obj-code takes the complete business object code. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
     { entry: z.enum(['bip-cli', 'erm', 'schema']), argv: z.array(z.string()).min(1),
       targetTenantId: z.string().trim().min(1).optional().describe('Verify the bip-cli session tenant before executing the command.') },
     async ({ entry, argv, targetTenantId }) => {
+      if (entry === 'bip-cli' && argv[0] === 'metadata' && argv[1] === 'find') {
+        for (const [index, token] of argv.entries()) {
+          if (token !== '--biz-obj-code' && !token.startsWith('--biz-obj-code=')) continue;
+          const code = token === '--biz-obj-code' ? argv[index + 1] : token.slice('--biz-obj-code='.length);
+          if (!code?.trim() || code.startsWith('-')) fail('INVALID_ARGUMENT', '--biz-obj-code requires a full business object code.');
+        }
+      }
       if (targetTenantId !== undefined) {
         if (entry !== 'bip-cli') fail('TENANT_CHECK_UNSUPPORTED', 'Tenant verification requires bip-cli.');
         const sessionArgs = [];

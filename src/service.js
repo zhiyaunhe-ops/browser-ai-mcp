@@ -4,14 +4,14 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const os = require('node:os');
 const { isDeepStrictEqual } = require('node:util');
-const { bindImprovement } = require('./improvements');
+const { bindImprovement } = require('./review/improvements');
 const { Store } = require('./storage');
 const { Memory, matchesScope } = require('./memory');
 const { EgoAdapter } = require('./ego');
 const { ScriptCache, nodeFromUrl } = require('./script-cache');
 const { MEMO_SHORT } = require('./memo');
 const { assertProgram } = require('./program-contract');
-const { callReviewToolkit, resolveDomainTag, resolveDomainTags } = require('./review-toolkit');
+const { callReviewToolkit, resolveDomainTag, resolveDomainTags } = require('./review/review-toolkit');
 
 const problem = (code, message, details = {}) => Object.assign(new Error(message), { code, ...details });
 const edition = domain_tag => domain_tag ? { domain_tag } : {};

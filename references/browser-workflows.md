@@ -32,6 +32,10 @@
 | 读取某次运行的评估进度、结论和总结 | `run_summary` |
 | 对照原始会话，追踪同一问题的历史和后续实测 | `eval_session_context`、`review_history`、`review_observe` |
 
+### Codex 调用结果
+
+在 Codex 的 exec 包装器中，用 `text({ browserOperation: { operation, runId, requestId }, result })` 输出每次调用的返回值。跳过的分支输出同一标识和 `skipped: true, reason`。同一工具有多个动态调用点时，用 `operationIndex` 标记源码中从 1 开始的调用点序号。循环的每次操作使用独立的 requestId。包装器返回 cell ID 时，用 wait 取得结果。
+
 ### 记录请求与复用
 
 每个浏览器执行轮次自动收集所操作页面的 XHR 和 Fetch 请求。用 `run_get` 查看本轮的 `networkCapture`。用 `evidence_query` 传入同一个 `runId`、`executionId` 和 `view: "api"` 可看方法、路径、查询参数名、请求体结构及响应状态。草稿的 `requestEvidence` 带回请求样本和证据 ID。样本超过 30 条时，用原任务的 `evidence_query` 翻页读取其余记录。下次任务命中这条流程记忆或页面提醒时，可以用返回的 `sourceRunId` 查回当时的请求。

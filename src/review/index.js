@@ -6,7 +6,7 @@ const { z } = require('zod');
 const { callReviewToolkit, resolveDomainTag } = require('./review-toolkit');
 const { sessionContext, sessionSearch } = require('./session-context');
 const { registerImprovementTools, recordVerification, link, proposal, plan } = require('./improvements');
-const { edition } = require('./service');
+const { edition } = require('../service');
 const text = z.string().min(1);
 const editionField = { domain_tag: text.optional() };
 const ids = z.array(text).max(100);
@@ -162,7 +162,7 @@ function registerEvaluationTools(register, service) {
     args => service.pendingReviews(args.cursor ?? 0, args.limit ?? 20,
       args.domain_tag === undefined ? undefined : resolveDomainTag({ domain_tag: args.domain_tag })),
     z.object({ runs: z.array(z.object({ ...runId, ...editionField, goal: text, outcome: text, reviewKey: text })), ...pagination }));
-  register('eval_packet', '评估模型读取任务目标、验收条件、执行结果、独立回读和采集缺口。用 evidence_query 补读记录与请求。将 relatedReviews 中的 attemptId 填入 review_history 的 attempt_id 查询往期评估。同一问题的后续尝试沿用 problem_id，翻页和提交沿用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
+  register('eval_packet', '按 runId 读取验收条件、原始会话位置、执行轮次、独立回读与采集缺口。翻页使用首页的 reviewKey。', { ...runId, ...page, reviewKey: text.optional() },
     args => service.store.transaction(() => packet(service, args)),
     z.object({ schemaVersion: z.literal(1), ...runId, improvement: link.extend({ delivery: z.number() }).optional(), ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
       sessionSearch: z.object({ roots: z.array(z.object({ client: text, path: text })), instructions: text }),
@@ -175,7 +175,7 @@ function registerEvaluationTools(register, service) {
       rounds: z.array(z.object({ executionId: text, sequence: z.number(),
         purpose: text, state: text, observationId: text.optional(), businessTool: text.optional(),
         result: z.unknown(), error: z.unknown(), networkCapture: z.unknown() })), gaps: z.array(z.record(z.unknown())), ...pagination }));
-  register('eval_submit', '独立评估模型提交逐条判定、同一任务的证据引用与总结。成功与失败都填写 toolChoice，独立判定工具选择。给出分步理由和 evidenceIds 或 sessionRefs；improvable 须指出当时可用且获准的替代工具及适用步骤。证据不足填 insufficient_evidence。填写可跨环境使用的经验和适用限制，环境与业务参数留在源运行证据。沿用 run_begin 预登记的 reviewMemory，也可补填 memory。可执行问题填 improvements，随评估创建具体改进项。Toolkit 按 problem_id 关联多次尝试。重试沿用 requestId。', {
+  register('eval_submit', '提交 reviewKey 对应的逐条判定、工具选择和证据。可附会话行号与改进项。返回结构化评估报告；重试沿用 requestId。', {
     ...runId, ...editionField, requestId: text, reviewKey: text, ...assessment, sessionRefs: sessionRefs.optional(), improvements: z.array(proposal).max(20).optional()
   }, args => submit(service, args), report);
   register('run_summary', '读取运行结果、评估进度及独立模型已提交的结构化总结。', runId, args => {
@@ -186,7 +186,7 @@ function registerEvaluationTools(register, service) {
       executionOutcome: reviewState === 'not_ready' ? run.outcome ?? null : run.feedback.outcome, reviewState,
       review: review ? { ...edition(run.domain_tag), ...review } : null };
   }, z.object({ ...runId, ...editionField, goal: text, url: text, executionOutcome: text.nullable(), reviewState: state, review: report.nullable() }));
-  register('eval_session_context', 'Read the original local harness JSONL by absolute path and physical line number. Compare the user request, corrections, tool output and final answer. Continue at nextLine. A truncated or missing record leaves that evidence incomplete.', {
+  register('eval_session_context', 'Read local session JSONL by absolute path and physical line number. Returns bounded records and nextLine.', {
     path: text, startLine: z.number().int().positive().optional(), limit: z.number().int().min(1).max(50).optional()
   }, sessionContext);
   register('review_observe', 'Record a later measurement for a local Browser reviewId. Use the deployed commit for version when known. Supply baseline for directional findings and observed_at with offset on the submission day. Identical measurements are idempotent.', {

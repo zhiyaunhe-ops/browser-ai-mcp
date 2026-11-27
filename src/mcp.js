@@ -5,8 +5,8 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const { createService } = require('./service');
-const { registerEvaluationTools, reviewMemorySchema, sessionSource } = require('./evaluation');
-const { link: improvementLink } = require('./improvements');
+const { registerEvaluationTools, reviewMemorySchema, sessionSource } = require('./review');
+const { link: improvementLink } = require('./review/improvements');
 const { updateTemplateField } = require('./asp-template');
 const { verifyTemplateBatch } = require('./asp-template-batch');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
@@ -35,9 +35,16 @@ function readWorkbench(service, businessTool, method, { runId, requestId, pageLa
   return service.browserRun({ runId, requestId, pageLabel, domain_tag, businessTool, args: input, purpose: 'observe', timeoutMs: 120000, code });
 }
 
-function createMcpServer(service = createService()) {
-  const server = new McpServer({ name: 'browser-ai', version: packageInfo.version }, {
-    instructions: '一次 CLI 失败只影响返回的命令。设计器编辑遇到页面列表查询失败，加载 iuap-yonbuilder-designer 并用 tool_search 精确查找 select:copilot_interactive_tool，再检查宿主 ai.* 能力；若返回 COPILOT_INTERACTIVE_STOPPED，报告当前宿主模式缺口，缺标识或能力时说明具体缺口。写前核对用户指定模板 ID，保存后独立回读同一 ID，禁止换模板代办。核对用户可见菜单时，先查询 workbench service list；查询失败可以只读查看实际菜单，原因按诊断报告。已有目标模板 ID 且设计器可定位时，直接在设计器读取身份、保存并独立回读，完成后结束，无需再用页面取证。菜单查询的 --help 仅说明用法，实际执行服务查询失败后才回退页面。Read scriptCache and guidance before browser actions. For a matching procedure use its invoke.script. 执行模型负责操作、记录和独立回读，结束时调用 run_finish 交接。遇到用户接手、权限或其他阻塞时，用 outcome=unknown 并在 note 说明缺口。评估模型在本机用 eval_pending、eval_packet 和 eval_session_context 对照原始会话，然后 eval_submit；路径缺失时按 eval_packet.sessionSearch 主动查找本机会话。完成后建议将可复用改动和验证依据通过 PR 提交到获授权的仓库，并返回链接。可执行问题调用 review_improve，实施代码、记忆、脚本或请求构造改动，再用 review_apply 登记实际版本。新 run 绑定 improvement，执行、独立回读并 eval_submit，回看 review_improvements。后续样本用 review_observe。用友的 domain_tag 按产品版本填写，ASP 费控的标签是「超级版和旗舰版」。开始同类任务时查看 recalledMemory.reviewLessons，沿用适用的验收步骤并留意上次的验证范围。每次浏览器业务操作必须记录实际请求，检查 networkCapture。用 evidence_query 查看方法、路径、参数结构和响应状态；没有观测到请求时记录缺口。复用已核实的业务请求，保留页面点击路径。只读请求失败时走页面并核对结果；写入结果不明时先独立回读，禁止两路重复提交。ASP UAT 打开节点用 asp_workbench_open_node，条件查询模板用 asp_workbench_query_templates，按单号查通用申请单用 asp_workbench_query_general_applications，PC 模板字段用 asp_ui_template_update_field，changes={} 读取属性。批量保存后用 asp_ui_template_verify_batch 在原 run 逐字段回读，再交接整批结果。其他流程用 run_begin 召回经验、browser_run 执行 ego 脚本、run_get 查结果、run_finish 核验并清理。'
+function createMcpServer(service = createService(), toolset = 'execution') {
+  const instructions = {
+    all: 'Browser AI provides YonBuilder queries, ASP workbench operations, durable browser runs and evidence review.',
+    execution: 'Execute browser runs and query recorded evidence.',
+    review: 'Review browser run evidence, submit assessments and track improvements.'
+  };
+  if (!Object.hasOwn(instructions, toolset)) throw new Error('Expected --tools all, execution or review.');
+  const name = toolset === 'review' ? 'browser-ai-review' : 'browser-ai';
+  const server = new McpServer({ name, version: packageInfo.version }, {
+    instructions: instructions[toolset] + ' Tool results are returned in structuredContent.data.'
   });
   const register = (name, description, inputSchema, method, resultSchema) => server.registerTool(name, {
     description, inputSchema, outputSchema: { data: resultSchema
@@ -60,21 +67,26 @@ function createMcpServer(service = createService()) {
       return { isError: true, structuredContent: { data }, content: [{ type: 'text', text: JSON.stringify({ data }) }] };
     }
   });
+  register('evidence_query', 'Read paginated run or execution records. view=api returns observed request methods, paths, parameter shapes, statuses and capture gaps.', {
+    runId: text, view: z.enum(['records', 'trace', 'api']).default('records'), ...pagination, executionId: text.optional()
+  }, args => service.queryEvidence(args));
+  if (toolset !== 'execution') registerEvaluationTools(register, service);
+  if (toolset === 'review') return server;
   require('./yonbuilder').registerYonbuilder(register, service);
-  registerEvaluationTools(register, service);
-  register('asp_workbench_open_node', '在当前 ASP UAT 任务中按精确服务名打开工作台节点。从目录取得编码后请求服务详情并调用工作台原生导航，失败后走工作台搜索及点选。结果通过 run_get 读取，可在同一任务继续操作。', {
+
+  register('asp_workbench_open_node', '按工作台服务名打开 ASP UAT 节点；同名节点可指定 nodeCode。返回执行 ID，通过 run_get 读取结果。', {
     ...workbenchRound, nodeName: text.describe('工作台中的精确服务名称，例如 UI模板。'),
     nodeCode: text.optional().describe('同名目录节点可用候选中的服务编码区分。')
   }, args => readWorkbench(service, 'asp_workbench_open_node', 'openNode', args));
-  register('asp_workbench_query_templates', '在当前 ASP UAT 任务中按单据、PC 页面类型查询企业级 UI 模板，可按模板 ID、模板名或交易类型筛选。优先用已核实的只读请求取数，失败后走模板列表。通过 run_get 读取结果及使用的路径。', {
+  register('asp_workbench_query_templates', '按单据和 PC 页面类型查询企业级模板。支持模板 ID、名称和交易类型筛选，通过 run_get 读取候选。', {
     ...workbenchRound, documentName: text.optional(), documentPath: z.array(text).nonempty().optional(),
     pageType: text.optional(), templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     limit: z.number().int().min(1).max(50).optional().describe('最多返回多少条模板定位信息，默认 10 条。')
   }, args => readWorkbench(service, 'asp_workbench_query_templates', 'queryTemplates', args));
-  register('asp_workbench_query_general_applications', '在 ASP UAT 通用申请单列表按单号精确查找。优先复用当前页面已核实的列表请求。首次需要识别查询方案或读取失败时使用工作台查询控件，核对结果中的实际单号。通过 run_get 查看使用路径及结果完整性。', {
+  register('asp_workbench_query_general_applications', '按完整单号查询 ASP UAT 通用申请单。通过 run_get 读取匹配结果和查询完整性。', {
     ...workbenchRound, billCode: text.describe('通用申请单的完整单据编号。')
   }, args => readWorkbench(service, 'asp_workbench_query_general_applications', 'queryGeneralApplications', args, billQueryScript));
-  register('asp_ui_template_update_field', '配置 ASP UAT 的 PC 单据 UI 模板表头字段或明细列。默认通用报销单表头。未命中时检查 candidates 的 fieldScope、detailEntity 和 fieldId，再精确指定字段；没有匹配时可查 searchedEntities。用 changes={} 读取属性，changes.properties 传属性名或编码，changes.formula 设置公式。设计器原生保存后独立回读。同一操作重试沿用 requestId，更改目标用新 requestId。', {
+  register('asp_ui_template_update_field', '读写 ASP UAT 的 PC 模板字段。changes={} 读取，changes.properties 设置属性，changes.formula 设置公式。返回候选或保存后的回读结果。', {
     requestId: text, domain_tag: domainTag, templateId: text.optional(), templateName: text.optional(), transactionType: text.optional(),
     documentName: text.optional().describe('工作台 UI 模板树中的单据名称。默认通用报销单。'),
     documentPath: z.array(text).nonempty().optional().describe('从业务域到单据名称的完整目录路径，用于区分同名单据。'),
@@ -90,22 +102,31 @@ function createMcpServer(service = createService()) {
       properties: z.record(z.unknown()).optional().describe('键为该字段的属性编码或面板上的精确名称，值按设计器元数据填写。下拉选项使用其 value。')
     }).strict()
   }, args => updateTemplateField(service, args));
-  register('asp_ui_template_verify_batch', '在原运行最后一次批量保存后逐字段重新打开模板，记录期望、实际和 observationId。用 run_begin 的 criteria 预登记 path=verifiedTargets、equals=完整 targets，验收时原样传回清单。已有运行也可核对当次提供的清单，布尔条件为 allSelectedFieldsMatch。全部匹配后将 verification 交给 run_finish。同一请求重试沿用 requestId，新增写入后重新发起验收。', {
+  register('asp_ui_template_verify_batch', '在原 run 中按 targets 逐字段回读已保存的模板，返回期望值、实际值和验收观察引用。支持 verifiedTargets 和 allSelectedFieldsMatch 条件。', {
     ...idempotent, targets: z.array(batchTarget).nonempty()
   }, args => verifyTemplateBatch(service, args));
-  register('run_begin', 'Create a durable task and recall procedures. Inspect recalledMemory.reviewLessons for independent reviews of similar runs. Register optional reviewMemory before execution to preserve the prediction and metric and group attempts by problem_id.', {
+  register('run_begin', 'Create a run with a goal, URL and observable criteria. Returns runId, matching procedures and script briefings.', {
     requestId: text, goal: text, url: z.string().url(), context: browserContext.optional(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
     domain_tag: domainTag, improvement: improvementLink.optional(), reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
   }, args => service.begin(args));
   register('yonbuilder_interaction_rule', 'Read a rule, capture one successful unchanged save in page memory, rename with readback, or release the capture. Use the same designer document for all rounds.', {
     ...idempotent, pageLabel: text.optional(), operation: z.enum(['read', 'capture', 'rename', 'release']),
     templateId: text, billNo: text, ownDomain: text, ruleCode: text,
-    expectedName: text.optional(), name: text.optional()
-  }, ({ runId, requestId, pageLabel, ...input }) => service.browserRun({
-    runId, requestId, pageLabel, purpose: input.operation === 'read' ? 'observe' : 'execute', args: input,
-    code: `return await page.evaluate(${interactionRule.toString()}, input);`
-  }));
-  register('browser_run', '菜单查询失败后才读取页面。设计器编辑走 copilot_interactive_tool。先阅读 scriptCache 中匹配的脚本说明，再传 invoke.script 或带 scriptBriefingId 的 code。Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. Await each same-run round and use run_get with its executionId while queued or running. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
+    expectedName: text.optional().describe('Current rule name, required for capture and rename.'),
+    name: text.optional().describe('New rule name, required for rename.')
+  }, ({ runId, requestId, pageLabel, ...input }) => {
+    if (['capture', 'rename'].includes(input.operation) && !input.expectedName) {
+      throw Object.assign(new Error('expectedName is required for capture and rename.'), { code: 'INVALID_ARGUMENT' });
+    }
+    if (input.operation === 'rename' && !input.name?.trim()) {
+      throw Object.assign(new Error('name is required for rename.'), { code: 'INVALID_ARGUMENT' });
+    }
+    return service.browserRun({
+      runId, requestId, pageLabel, purpose: input.operation === 'read' ? 'observe' : 'execute', args: input,
+      code: `return await page.evaluate(${interactionRule.toString()}, input);`
+    });
+  });
+  register('browser_run', '在已有 run 中执行一个 ego 轮次。传 code（可用 task、page、input）或缓存脚本简报中的 invoke.script。args 作为 input。用返回的 executionId 查询状态、结果和网络记录。', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text.optional(),
     script: z.object({ id: text, version: text, briefingId: text.optional() }).optional(),
     scriptBriefingId: text.optional(), fallbackReason: text.optional(), context: browserContext.optional(),
@@ -116,23 +137,20 @@ function createMcpServer(service = createService()) {
   register('run_get', 'Read durable run and execution state without replaying commands. Query the executionId returned by the round or in blockingExecutions. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
-  register('run_finish', 'Hand off the execution outcome and its observations for independent evaluation on this MCP server (eval_pending). For a blocker, call with outcome="unknown" and document what prevented verification in note. Success requires a post-action readback. For a routine handoff omit decision, usedMemoryIds and updates; retain note for mismatches or missing evidence. confirmed requires nonempty usedMemoryIds. learned/corrected require nonempty updates; any corrected memoryId must also appear in usedMemoryIds. Acceptance does not establish cleanup completion; inspect run state and cleanup.state with run_get. Finish the ego Space once. Save a reusable page reminder in updates[].entry with scope "page", key, name, actionable summary and match (path or pathPrefix, optional hashPrefix and exact dialogTitle). Use baseRevision 0 for a new entry.', {
+  register('run_finish', 'Close a run with its outcome and criterion-to-observation references. Success requires matching independent readbacks after the last write. Optional updates record versioned memory changes.', {
     ...idempotent, outcome: z.enum(['succeeded', 'failed', 'unknown', 'cancelled']),
     verification: z.array(z.object({ criterionId: text, observationId: text })).default([]),
     decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']).optional(),
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),
     note: text.optional(), keepPages: z.array(text).optional(), retryCleanup: z.boolean().optional()
   }, args => service.finish(args));
-  register('memory_search', 'Recall procedures and reviewLessons relevant to the goal. Set domain_tag to share applicable procedures and lessons across environments of the same product edition. Use an empty goal to browse that edition’s lessons. Use sourceRunId in evidence_query for the original Browser records.', {
+  register('memory_search', 'Find procedures and review lessons by URL, goal and product edition. An empty goal browses the edition.', {
     url: z.string().url(), goal: z.string(), context: browserContext.optional(), domain_tag: domainTag, limit: z.number().int().min(1).max(10).optional()
   }, args => service.searchMemory(args));
   register('memory_get', 'Read the complete procedure, revision and provenance for one memory.', {
     memoryId: text
   }, args => service.getMemory(args));
-  register('evidence_query', 'Read recorded requests and capture gaps by run or execution. Use view=api for observed methods, paths, query keys, request shapes and statuses. Follow nextCursor while hasMore. An observed endpoint still needs business verification before reuse.', {
-    runId: text, view: z.enum(['records', 'trace', 'api']).default('records'), ...pagination, executionId: text.optional()
-  }, args => service.queryEvidence(args));
-  register('recipe_draft', 'Draft a reusable workflow with automatic request evidence and links to originating executions. Document the verified request inputs, observed click fallback and how to read back the business result in proposedRecipe.', {
+  register('recipe_draft', 'Draft a reusable procedure from a run, with captured request evidence and source execution IDs.', {
     ...idempotent, name: text, proposedRecipe: z.record(z.unknown()).optional()
   }, args => service.draftRecipe(args));
   return server;
@@ -141,15 +159,17 @@ function createMcpServer(service = createService()) {
 async function main() {
   const args = process.argv.slice(2);
   const options = {};
+  let toolset = 'execution';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--data-dir' && args[i + 1]) options.dataDir = args[++i];
+    else if (args[i] === '--tools' && args[i + 1]) toolset = args[++i];
     else if (args[i] === '--help' || args[i] === '-h') {
-      process.stdout.write(`Usage: node src/mcp.js [--data-dir ABSOLUTE_DIRECTORY]\nRequires Node ${packageInfo.engines.node}. Browser execution requires ego-browser. Transport: MCP stdio.\n`);
+      process.stdout.write(`Usage: node src/mcp.js [--data-dir ABSOLUTE_DIRECTORY] [--tools all|execution|review]\nRequires Node ${packageInfo.engines.node}. Browser execution requires ego-browser. Transport: MCP stdio.\n`);
       return;
     } else throw new Error(`Unknown argument: ${args[i]}`);
   }
   const service = createService(options);
-  const server = createMcpServer(service);
+  const server = createMcpServer(service, toolset);
   const transport = new StdioServerTransport();
   server.onclose = () => service.close();
   await server.connect(transport);
