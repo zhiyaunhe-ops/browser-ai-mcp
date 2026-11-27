@@ -119,7 +119,26 @@ return info;` });
   }
 
   register('yonbuilder_cli', 'Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
-    { entry: z.enum(['bip-cli', 'erm', 'schema']), argv: z.array(z.string()).min(1) }, a => a.entry === 'schema' ? readSchema(a.argv) : invoke(a.entry, a.argv));
+    { entry: z.enum(['bip-cli', 'erm', 'schema']), argv: z.array(z.string()).min(1),
+      targetTenantId: z.string().trim().min(1).optional().describe('Verify the bip-cli session tenant before executing the command.') },
+    async ({ entry, argv, targetTenantId }) => {
+      if (targetTenantId !== undefined) {
+        if (entry !== 'bip-cli') fail('TENANT_CHECK_UNSUPPORTED', 'Tenant verification requires bip-cli.');
+        const sessionArgs = [];
+        for (const [index, arg] of argv.entries()) {
+          if (arg !== '--session-id' && !arg.startsWith('--session-id=')) continue;
+          const id = arg === '--session-id' ? argv[index + 1] : arg.slice('--session-id='.length);
+          if (sessionArgs.length || !id || id.startsWith('-')) fail('INVALID_ARGUMENT', 'Supply one valid session ID.');
+          sessionArgs.push('--session-id', id);
+        }
+        const identity = await invoke(entry, ['whoami', '--format', 'json', ...sessionArgs]);
+        if (!identity?.tenantid) fail('TENANT_UNKNOWN', 'Unable to verify the current tenant.');
+        if (identity.tenantid !== targetTenantId) {
+          fail('TENANT_MISMATCH', `Expected tenant ${targetTenantId}, current tenant is ${identity.tenantid}.`);
+        }
+      }
+      return entry === 'schema' ? readSchema(argv) : invoke(entry, argv);
+    });
   const target = { ...environment, microservice: word, bill: word, template: word, field: word };
   const fields = a => ({ 'microservice-code': a.microservice, 'bill-no': a.bill, 'tpl-id': a.template, field: a.field });
   register('yonbuilder_field_get', 'Read all exact-name field matches on a template.', target, async a => {
