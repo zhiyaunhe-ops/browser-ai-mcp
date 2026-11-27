@@ -42,7 +42,9 @@ export function readSyncedDsh(day, timeZone = "Asia/Hong_Kong") {
       rows.push({ source: "windows_dsh", transport: input.browser_source === "shell_browser" ? "cli" : "native_mcp",
         operation: event.tool, category: /^(?:eval_|review_)/.test(event.tool) ? "review" :
           /^(?:run_begin|run_finish|run_get)$/.test(event.tool) ? "lifecycle" : "operation",
-        resultScope: "tool_response", status: output?.is_error === true ? "fail" : output?.is_error === false ? "ok" : "unknown",
+        resultScope: "tool_response",
+        toolStatus: output?.is_error === true ? "fail" : output?.is_error === false ? "ok" : "unknown",
+        status: output?.is_error === true ? "fail" : "unknown", businessStatus: "unknown",
         timestamp: new Date(event.time).toISOString(), sessionId: event.session, callId: event.call_id,
         runId: output?.run_id || input.run_id || null, executionId: output?.execution_id || input.execution_id || null,
         errorCode: output?.error_code || null, evidence: { call: ref(event.seq), result: found ? ref(found.seq) : null } });
@@ -62,11 +64,21 @@ export function readSyncedDsh(day, timeZone = "Asia/Hong_Kong") {
       if (checked.has(key)) continue;
       checked.add(key);
       const observed = lookup.get(host, row.runId);
-      if (!observed) continue;
+      if (!observed) {
+        coverage.recorderReadbacks.push({ host, runId: row.runId, state: null, outcome: null,
+          verificationRefs: 0, verification: [], gaps: ["recorder_readback_missing"] });
+        continue;
+      }
       const data = JSON.parse(observed.data);
       coverage.recorderReadbacks.push({ host, runId: row.runId, observed: observed.observed,
         state: data.state, outcome: data.outcome, source: observed.source,
-        verificationRefs: data.verification_refs?.length ?? 0 });
+        verificationRefs: data.verification_refs?.length ?? 0,
+        verification: data.verification_refs ?? [],
+        gaps: [
+          ...(!["completed", "failed", "cancelled"].includes(data.state) ? ["run_state_unconfirmed"] : []),
+          ...(!["succeeded", "failed", "cancelled"].includes(data.outcome) ? ["run_outcome_unconfirmed"] : []),
+          ...(!data.verification_refs?.length ? ["verification_refs_missing"] : [])
+        ] });
     }
     coverage.available = true;
     return { rows, coverage };

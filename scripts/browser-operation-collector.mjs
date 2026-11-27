@@ -24,10 +24,10 @@ const callMarker = /browser|playwright|selenium|puppeteer|chrome|chromium|msedge
 const resultId = /"(?:call_id|toolCallId)"\s*:\s*"([^"]+)"/;
 const sessionFile = /\.(?:jsonl(?:\.zs(?:t|td))?|zstd)$/i;
 const stateSet = new Set(["running", "succeeded", "failed", "outcome_unknown", "cancelled", "pending", "queued", "needs_user_action", "completed"]);
-const operationSuccess = new Set(["updated", "verified", "already_set", "inspected"]);
+const operationSuccess = new Set(["updated", "verified", "already_set", "inspected", "opened"]);
 const operationFailure = new Set(["verification_failed", "not_found", "ambiguous", "read_error",
   "template_not_found", "field_not_found", "ambiguous_template", "ambiguous_field",
-  "template_mismatch", "field_properties_unavailable"]);
+  "template_mismatch", "field_properties_unavailable", "node_not_found", "node_unconfirmed", "ambiguous_node"]);
 const runningCell = /^Script running with cell ID (\S+)/i;
 
 const json = value => {
@@ -206,6 +206,7 @@ function executionMetadata(value) {
   const executionId = value.executionId ?? (state && [value.id, value.e].find(id => typeof id === "string" && UUID.test(id)));
   if (!executionId || !state || state === "completed") return null;
   return { executionId, state, runId: value.runId, requestId: value.requestId, businessTool: value.businessTool,
+    result: value.result,
     observationId: value.observationId, explicitId: Boolean(value.executionId), trace: normalizeObservationTrace(value.observationTrace), networkCapture: value.networkCapture,
     errorCode: value.error?.code, purpose: value.purpose,
     startedAt: value.startedAt, finishedAt: value.finishedAt, executionStopped: value.executionStopped,
@@ -222,6 +223,15 @@ function outcome(value, operation, transport) {
   if (transport === "cli") {
     const exitCode = value.exit_code ?? value.exitCode;
     if (typeof exitCode === "number") return exitCode === 0 ? "ok" : "fail";
+  }
+  const execution = executionMetadata(value);
+  if (execution && /^(?:browser_run|asp_workbench_)/.test(operation)) {
+    if (execution.state === "failed") return "fail";
+    return execution.state === "succeeded"
+      ? outcome(value.result, value.businessTool || operation, transport) : "unknown";
+  }
+  if (operation === "asp_workbench_open_node" && typeof value.rendered === "boolean") {
+    return value.status === "opened" && value.rendered ? "ok" : "fail";
   }
   if (operation === "asp_ui_template_verify_batch" && typeof value.allSelectedFieldsMatch === "boolean") {
     return value.allSelectedFieldsMatch ? "ok" : "fail";
@@ -412,7 +422,7 @@ async function scanSource(source, roots, { inDay, until }) {
             (!other.requestId || other.requestId === identity.requestId) && (!other.runId || other.runId === identity.runId));
           if (matches.length !== 1 || matches[0].row !== row) continue;
           const responses = outputParts(value.result);
-          const response = responses.find(item => typeof item?.runId === "string" || typeof item?.code === "string");
+          const response = responses.find(item => typeof item?.executionId === "string" || typeof item?.runId === "string" || typeof item?.code === "string");
           const invocation = { requestId: identity.requestId, runId: response?.runId ?? identity.runId,
             executionId: response?.executionId, observationId: response?.observationId,
             errorCode: response?.code ?? response?.error?.code, evidence: resultEvidence };
@@ -470,6 +480,17 @@ async function scanSource(source, roots, { inDay, until }) {
   }
   const rows = [...calls.values()].filter(call => call.selected).flatMap(call => call.rows.map(({ row }) => row));
   for (const row of rows) {
+    for (const invocation of row.wrapperInvocations || []) {
+      const state = states.get(invocation.executionId);
+      if (invocation.state !== "observed" || !state) continue;
+      invocation.runId ||= state.runId;
+      invocation.observationId ||= state.observationId;
+      invocation.errorCode ||= state.errorCode;
+      invocation.executionState = state.state;
+      invocation.businessStatus = outcome(state.result, state.businessTool || row.operation, row.transport);
+      invocation.status = outcome(state, row.operation, row.transport);
+      invocation.finalEvidence = state.evidence;
+    }
     if (row.wrapperInvocations?.length === 1) {
       const invocation = row.wrapperInvocations[0];
       row.wrapperExecution = invocation.state;
@@ -500,6 +521,14 @@ async function scanSource(source, roots, { inDay, until }) {
 
 function applyExecution(row, state, source) {
   row.runId ||= state.runId ?? null;
+  row.evidence.execution = source;
+  if (state.result != null) {
+    row.businessStatus = outcome(state.result, state.businessTool || row.operation, row.transport);
+    row.businessResult = { status: state.result.status ?? null,
+      ...(typeof state.result.rendered === "boolean" ? { rendered: state.result.rendered } : {}) };
+    row.evidence.business = source;
+  }
+  row.businessStatus ||= "unknown";
   if (!["succeeded", "failed"].includes(row.executionState)) row.executionState = state.state;
   row.purpose ||= state.purpose;
   row.observationId ||= state.observationId;
@@ -516,8 +545,11 @@ function applyExecution(row, state, source) {
     status: state.networkCapture.status, capturedRequests: state.networkCapture.capturedRequests,
     gaps: state.networkCapture.gaps?.map(gap => gap.kind)
   };
-  if (row.status === "unknown" && ["succeeded", "failed"].includes(state.state)) {
-    row.status = state.state === "succeeded" ? "ok" : "fail";
+  if (row.businessStatus !== "unknown") {
+    row.status = row.businessStatus;
+    row.evidence.state = row.evidence.business;
+  } else if (row.status === "unknown" && state.state === "failed") {
+    row.status = "fail";
     row.evidence.state = source;
   }
 }
