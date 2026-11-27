@@ -19,13 +19,16 @@ const space = z.number().int().nonnegative();
 const endpoint = value => value.replace(/\/+$/, '');
 
 async function cli(entry, argv) {
-  const root = process.env.BROWSER_AI_YONBUILDER_ROOT;
+  const portable = process.env.BROWSER_AI_PORTABLE_ROOT;
+  const root = portable || process.env.BROWSER_AI_YONBUILDER_ROOT;
   const cwd = process.env.BROWSER_AI_YONBUILDER_WORKSPACE;
-  if (!root || !cwd) throw new Error('Set BROWSER_AI_YONBUILDER_ROOT and BROWSER_AI_YONBUILDER_WORKSPACE.');
-  const program = path.resolve(root, 'skills', 'iuap-apcom-cli', 'scripts', entry + '.js');
+  if (!root || !cwd) throw new Error('Configure BROWSER_AI_PORTABLE_ROOT and BROWSER_AI_YONBUILDER_WORKSPACE.');
+  const node = portable ? path.resolve(portable, 'bin', process.platform === 'win32' ? 'node.exe' : 'node') : process.execPath;
+  const scriptsRoot = portable ? root : path.resolve(root, 'skills');
+  const program = path.resolve(scriptsRoot, 'iuap-apcom-cli', 'scripts', entry + '.js');
   let result;
   try {
-    result = await execute(process.execPath, [program, ...argv], { cwd, timeout: 90000, maxBuffer: 8 << 20, windowsHide: true });
+    result = await execute(node, [program, ...argv], { cwd, timeout: 90000, maxBuffer: 8 << 20, windowsHide: true });
   } catch (error) {
     throw cliFailure(entry, argv, error);
   }

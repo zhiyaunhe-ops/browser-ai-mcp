@@ -95,7 +95,7 @@ In a Codex `exec` wrapper, use `text({ browserOperation: { operation, runId, req
 - [Eval and Toolkit workflows](references/browser-eval.md)
 ## Optional YonBuilder tools
 
-Configure `BROWSER_AI_YONBUILDER_ROOT` (local plugin installation) and `BROWSER_AI_YONBUILDER_WORKSPACE` (authenticated workspace) in the MCP host. The server invokes the installed CLI with Node. Each operator supplies their own CLI, workspace and credentials.
+Extract the portable CLI archive locally. Set `BROWSER_AI_PORTABLE_ROOT` to its extracted `yon-tools` directory and `BROWSER_AI_YONBUILDER_WORKSPACE` to the authenticated workspace. The server runs the scripts in `iuap-apcom-cli/scripts/` with the Node executable in `bin/`. Existing plugin installations can continue using `BROWSER_AI_YONBUILDER_ROOT`.
 
 Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Then use `yonbuilder_app_get` for the selected application’s details. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
 
