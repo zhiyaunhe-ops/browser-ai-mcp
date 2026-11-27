@@ -5,6 +5,9 @@ description: Run browser tasks through MCP and ego lite with scoped Yonyou reade
 
 # Browser tasks through MCP
 
+一次 CLI 失败只影响返回的命令。设计器编辑遇到页面列表查询失败，加载 iuap-yonbuilder-designer 并用 tool_search 精确查找 select:copilot_interactive_tool，再检查宿主 ai.* 能力；若返回 COPILOT_INTERACTIVE_STOPPED，报告当前宿主模式缺口，缺标识或能力时说明具体缺口。写前核对用户指定模板 ID，保存后独立回读同一 ID，禁止换模板代办。核对用户可见菜单时，先查询 workbench service list；查询失败可以只读查看实际菜单，原因按诊断报告。已有目标模板 ID 且设计器可定位时，直接在设计器读取身份、保存并独立回读，完成后结束，无需再用页面取证。菜单查询的 --help 仅说明用法，实际执行服务查询失败后才回退页面。
+
+
 For database structure, call `yonbuilder_cli` directly with `entry="schema"`. The MCP host needs PowerShell 7 and a local read-only SQL Server connection string in `BROWSER_AI_SCHEMA_CONNECTION`. Keep the connection string in the host environment.
 
 - If the schema and table are known, use `{"entry":"schema","argv":["table","dbo","Invoice"]}`. Read `columns`, `indexes` and `foreignKeys`. Composite primary-key columns have `primaryKey=true` and are ordered by `keyOrdinal`.

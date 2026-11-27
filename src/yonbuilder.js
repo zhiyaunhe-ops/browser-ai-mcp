@@ -1,5 +1,6 @@
 'use strict';
 
+const { cliFailure } = require('./cli-error');
 const { readSchema } = require('./schema');
 
 const { execFile } = require('node:child_process');
@@ -26,7 +27,7 @@ async function cli(entry, argv) {
   try {
     result = await execute(process.execPath, [program, ...argv], { cwd, timeout: 90000, maxBuffer: 8 << 20, windowsHide: true });
   } catch (error) {
-    throw new Error('YonBuilder command failed: ' + (error.code ?? 'unknown'));
+    throw cliFailure(entry, argv, error);
   }
   try { return JSON.parse(result.stdout); } catch { return result.stdout.trim(); }
 }
@@ -118,7 +119,7 @@ return info;` });
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 
-  register('yonbuilder_cli', 'Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
+  register('yonbuilder_cli', '核对当前角色可见的费控菜单和入口先查 workbench service list。Run a locally installed YonBuilder CLI with literal arguments. Discover commands with --help or --schema. Some CLI commands write live data. Use entry schema for on-demand SQL Server table, column, key and index metadata.',
     { entry: z.enum(['bip-cli', 'erm', 'schema']), argv: z.array(z.string()).min(1) }, a => a.entry === 'schema' ? readSchema(a.argv) : invoke(a.entry, a.argv));
   const target = { ...environment, microservice: word, bill: word, template: word, field: word };
   const fields = a => ({ 'microservice-code': a.microservice, 'bill-no': a.bill, 'tpl-id': a.template, field: a.field });
