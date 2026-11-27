@@ -13,6 +13,9 @@ export function readRecorderExecutions(day, timeZone) {
   try {
     const query = db.prepare(`SELECT id AS executionId, json_extract(json,'$.runId') AS runId,
       json_extract(json,'$.requestId') AS requestId,
+      json_extract(json,'$.businessTool') AS businessTool,
+      json_extract(json,'$.purpose') AS purpose,
+      json_quote(json_extract(json,'$.result')) AS resultJson,
       json_extract(json,'$.startedAt') AS startedAt, json_extract(json,'$.state') AS state,
       json_extract(json,'$.observationId') AS observationId,
       json_extract(json,'$.finishedAt') AS finishedAt,
@@ -22,6 +25,8 @@ export function readRecorderExecutions(day, timeZone) {
     const midnight = Date.parse(day + "T00:00:00Z");
     for (const row of query.iterate(midnight - 86400000, midnight + 172800000)) {
       if (dayOf(row.startedAt, timeZone) === day) {
+        row.result = JSON.parse(row.resultJson);
+        delete row.resultJson;
         if (row.executionStopped !== null) row.executionStopped = Boolean(row.executionStopped);
         executions.push(row);
       }
