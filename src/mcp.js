@@ -10,6 +10,7 @@ const { link: improvementLink } = require('./improvements');
 const { updateTemplateField } = require('./asp-template');
 const { verifyTemplateBatch } = require('./asp-template-batch');
 const { workbenchScript, billQueryScript } = require('./asp-scripts');
+const { interactionRule } = require('./interaction-rule');
 const packageInfo = require('../package.json');
 
 const text = z.string().min(1);
@@ -96,6 +97,14 @@ function createMcpServer(service = createService()) {
     requestId: text, goal: text, url: z.string().url(), context: browserContext.optional(), criteria: z.array(criterion).max(30), recipeIds: z.array(text).optional(),
     domain_tag: domainTag, improvement: improvementLink.optional(), reviewMemory: reviewMemorySchema.optional(), sessionSource: sessionSource.optional().describe("Original local JSONL log, session ID and optional first relevant line for the reviewer.")
   }, args => service.begin(args));
+  register('yonbuilder_interaction_rule', 'Read a rule, capture one successful unchanged save in page memory, rename with readback, or release the capture. Use the same designer document for all rounds.', {
+    ...idempotent, pageLabel: text.optional(), operation: z.enum(['read', 'capture', 'rename', 'release']),
+    templateId: text, billNo: text, ownDomain: text, ruleCode: text,
+    expectedName: text.optional(), name: text.optional()
+  }, ({ runId, requestId, pageLabel, ...input }) => service.browserRun({
+    runId, requestId, pageLabel, purpose: input.operation === 'read' ? 'observe' : 'execute', args: input,
+    code: `return await page.evaluate(${interactionRule.toString()}, input);`
+  }));
   register('browser_run', '菜单查询失败后才读取页面。设计器编辑走 copilot_interactive_tool。先阅读 scriptCache 中匹配的脚本说明，再传 invoke.script 或带 scriptBriefingId 的 code。Execute ego code with task, page and input. Every business operation must record observed requests. Check networkCapture in run_get and inspect evidence_query for method, path, parameter shape, status or capture gaps. Prefer a verified request; on a failed read use the observed UI route. Independently read back an uncertain write before any retry. Check pageMemos for the current route/dialog. For missing Yonyou nodes inspect ys.entries() and modeActions; for two-pane pickers use ys.transferState/transferRight. Await each same-run round and use run_get with its executionId while queued or running. DOM globals belong in page.evaluate(). Finish with an independent observe round and run_finish.', {
     ...idempotent, purpose: z.enum(['execute', 'observe']), code: text.optional(),
     script: z.object({ id: text, version: text, briefingId: text.optional() }).optional(),
