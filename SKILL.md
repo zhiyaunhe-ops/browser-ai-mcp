@@ -97,7 +97,7 @@ In a Codex `exec` wrapper, use `text({ browserOperation: { operation, runId, req
 
 Extract the portable CLI archive locally. Set `BROWSER_AI_PORTABLE_ROOT` to its extracted `yon-tools` directory and `BROWSER_AI_YONBUILDER_WORKSPACE` to the authenticated workspace. The server runs the scripts in `iuap-apcom-cli/scripts/` with the Node executable in `bin/`. Existing plugin installations can continue using `BROWSER_AI_YONBUILDER_ROOT`.
 
-Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Then use `yonbuilder_app_get` for the selected application’s details. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
+Use `yonbuilder_app_list`, `yonbuilder_bizobj_list` and `yonbuilder_page_list` to identify a target in the selected session. Then use `yonbuilder_app_get` for the selected application’s details. Read an exact field with `yonbuilder_field_get` and preview a property change with `yonbuilder_field_preview`. To apply and verify a property, use `yonbuilder_field_set` with the target tenant and container. Use `yonbuilder_cli` for other supported commands. `yonbuilder_open` returns a space ID for `yonbuilder_current_page`. When a name matches several pages, choose a unique code from the candidates.
 
 ## Versioned local procedures
 

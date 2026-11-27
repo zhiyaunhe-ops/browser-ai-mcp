@@ -49,3 +49,33 @@ test('a tenant-scoped CLI query checks its session before dispatch', async () =>
   await query({ entry: 'bip-cli', argv });
   assert.deepEqual(calls, [argv]);
 });
+
+test('field set uses the verified session for the write and an independent readback', async t => {
+  const previous = process.env.YONCLAW_REQ_PROXY_BASE_URL;
+  delete process.env.YONCLAW_REQ_PROXY_BASE_URL;
+  t.after(() => { if (previous !== undefined) process.env.YONCLAW_REQ_PROXY_BASE_URL = previous; });
+  const tools = new Map();
+  const calls = [];
+  let readStatus = 'unchanged';
+  let tenant = 'expected';
+  registerYonbuilder((name, description, schema, call) => tools.set(name, call), {}, async (entry, args) => {
+    if (args[0] === 'system') return { sessions: [{ tenantId: 'expected', sessionId: 's' }] };
+    assert.deepEqual(args.slice(-2), ['--session-id', 's']);
+    if (args[0] === 'whoami') return { tenantid: tenant };
+    assert.ok(args.includes('--value=false'));
+    const dryRun = args.includes('--dry-run');
+    calls.push(dryRun ? 'read' : 'write');
+    return { success: true, dryRun, microserviceCode: 'svc', billNo: 'bill', tplId: '42', field: 'name',
+      prop: 'required', appliedCount: 1, results: [{ groupId: 'header', designId: '1',
+        status: dryRun ? readStatus : 'changed', oldValue: false }] };
+  });
+  const set = tools.get('yonbuilder_field_set');
+  const args = { microservice: 'svc', bill: 'bill', template: '42', field: 'name', group: 'header',
+    property: 'required', value: 'false', targetTenantId: 'expected' };
+  assert.equal((await set(args)).verified, true);
+  readStatus = 'changed';
+  await assert.rejects(set(args), { code: 'FIELD_VERIFICATION_FAILED' });
+  tenant = 'other';
+  await assert.rejects(set(args), { code: 'TENANT_MISMATCH' });
+  assert.deepEqual(calls, ['write', 'read', 'write', 'read']);
+});

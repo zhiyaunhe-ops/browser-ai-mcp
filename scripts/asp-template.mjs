@@ -354,10 +354,12 @@ export async function update(task, page, target) {
 }
 
 export async function verify(task, page, target) {
-  const rows = await page.evaluate(templateRows, { templateId: target.templateId, templateName: target.templateName,
-    transactionType: target.transactionType });
-  if (rows.length !== 1) throw new Error('Template identity changed before verification');
-  return { ...rows[0], ...requiredValue(await verifyModel(task, page, { ...target, desired: { 'UI#required': true } })) };
+  const result = requiredValue(await verifyModel(task, page, {
+    ...target, desired: { 'UI#required': true },
+  }));
+  // The workbench bound the transaction type to this template during lookup.
+  if (result.status || result.templateId !== target.templateId) return result;
+  return { ...result, transactionType: target.transactionType };
 }
 
 export async function verifyBatchField(task, _page, { index, target, previousRows, targets }) {

@@ -231,6 +231,21 @@ test('save receipt is attributed to the selected bill as well as template', asyn
   assert.equal(result.savePost.status, 201);
 });
 
+test('required readback survives workbench navigation and rejects a different designer', async () => {
+  const { verify } = await import('../scripts/asp-template.mjs');
+  const selected = { ...target, transactionType: 'Expense transaction' };
+  for (const required of [true, false]) {
+    const { page } = designerPage({ required });
+    const result = await verify({ newPage: async () => page }, {}, selected);
+    assert.equal(result.required, required);
+    assert.equal(result.templateId, selected.templateId);
+    assert.equal(result.transactionType, selected.transactionType);
+  }
+  const { page } = designerPage({ title: 'Other template' });
+  const mismatch = await verify({ newPage: async () => page }, {}, selected);
+  assert.equal(mismatch.status, 'template_mismatch');
+});
+
 test('reopened designer resolves a persistent field ID when the node ID changes', async () => {
   const { verifyModel } = await import('../scripts/asp-template.mjs');
   const { page } = designerPage({ nodeId: 'new-node', nodeAttributes: { id: '2672308697195610168' } });

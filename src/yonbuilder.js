@@ -1,5 +1,6 @@
 'use strict';
 
+const { setField } = require('./field-set');
 const { cliFailure } = require('./cli-error');
 const { readSchema } = require('./schema');
 
@@ -42,11 +43,11 @@ function fail(code, message, candidates) {
 function registerYonbuilder(register, service, invoke = cli) {
   async function session(a) {
     const { sessions = [], defaultSessionId } = await invoke('bip-cli', ['system', 'session', 'list', '--format', 'json']);
-    const matches = sessions.filter(s => (!a.sessionId || s.sessionId === a.sessionId) &&
+    const matches = sessions.filter(s => (!a.targetTenantId || s.tenantId === a.targetTenantId) && (!a.sessionId || s.sessionId === a.sessionId) &&
       (!a.baseUrl || endpoint(s.baseUrl) === endpoint(a.baseUrl)));
     if (!matches.length) fail('SESSION_NOT_FOUND', 'No session matches the selected environment.');
     if (matches.length === 1) return matches[0];
-    if (!a.baseUrl && !a.sessionId) {
+    if (!a.targetTenantId && !a.baseUrl && !a.sessionId) {
       const preferred = matches.find(s => s.sessionId === defaultSessionId || s.isDefault);
       if (preferred) return preferred;
     }
@@ -154,6 +155,34 @@ return info;` });
   register('yonbuilder_field_preview', 'Preview one field property in one container using --dry-run.',
     { ...target, group: word, property: word, value: word }, async a => query(await session(a), 'ui', 'set-prop',
       { ...fields(a), 'group-id': a.group, prop: a.property, value: a.value, 'dry-run': true }));
+  const argument = word.refine(value => !value.startsWith('-'));
+  register('yonbuilder_field_set', 'Set one template field property and verify it by reading fresh settings in the same container.',
+    { ...environment, sessionId: argument.optional(), microservice: argument, bill: argument, template: argument,
+      field: argument, group: argument, property: z.enum(['bShowIt', 'bIsNull', 'required', 'bCanModify',
+        'cDefaultValue', 'iColWidth', 'iNumPoint', 'formula']), value: z.string(), org: argument.optional(),
+      terminal: z.enum(['1', '3']).optional(), targetTenantId: optional },
+    async a => {
+      const tenant = a.targetTenantId || process.env.BROWSER_AI_TARGET_TENANT_ID;
+      if (!tenant) fail('TARGET_TENANT_REQUIRED', 'Supply targetTenantId for the intended environment.');
+      let selector = [];
+      if (process.env.YONCLAW_REQ_PROXY_BASE_URL) {
+        if (a.sessionId) fail('SESSION_MISMATCH', 'The managed channel uses the host session.');
+        if (a.baseUrl) {
+          const env = await invoke('bip-cli', ['system', 'yonbip', 'env', '--format', 'json']);
+          if (!env?.baseUrl || endpoint(env.baseUrl) !== endpoint(a.baseUrl)) fail('ENVIRONMENT_MISMATCH', 'Managed environment differs.');
+        }
+      } else {
+        const selected = await session({ ...a, targetTenantId: tenant });
+        if (!selected.sessionId) fail('SESSION_NOT_FOUND', 'Missing selected session identity.');
+        selector = ['--session-id', selected.sessionId];
+      }
+      const checked = async (entry, argv) => {
+        const identity = await invoke(entry, ['whoami', '--format', 'json', ...selector]);
+        if (identity?.tenantid !== tenant) fail('TENANT_MISMATCH', 'Cannot confirm the requested tenant.');
+        return invoke(entry, [...argv, ...selector]);
+      };
+      return setField(checked, input => Object.entries(fields(input)).flatMap(([key, value]) => ['--' + key, value]), a);
+    });
   const identity = { appId: optional, appCode: optional };
   register('yonbuilder_app_list', 'List or search applications in a selected session.',
     { ...environment, keyword: optional, page: z.number().int().positive().optional(), size: z.number().int().positive().max(100).optional(),
