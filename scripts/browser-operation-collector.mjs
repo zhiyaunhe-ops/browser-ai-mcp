@@ -233,6 +233,14 @@ function outcome(value, operation, transport) {
   if (operation === "asp_workbench_open_node" && typeof value.rendered === "boolean") {
     return value.status === "opened" && value.rendered ? "ok" : "fail";
   }
+  if (operation === "asp_workbench_query_templates") {
+    if (value.status === "queried") return "ok";
+    if (["page_type_not_found", "ambiguous_document", "document_not_found"].includes(value.status)) return "fail";
+  }
+  if (operation === "asp_workbench_query_general_applications") {
+    if (value.status === "matched" && value.complete === true) return "ok";
+    if (["no_match", "bill_code_required", "query_unavailable"].includes(value.status)) return "fail";
+  }
   if (operation === "asp_ui_template_verify_batch" && typeof value.allSelectedFieldsMatch === "boolean") {
     return value.allSelectedFieldsMatch ? "ok" : "fail";
   }
@@ -545,12 +553,12 @@ function applyExecution(row, state, source) {
     status: state.networkCapture.status, capturedRequests: state.networkCapture.capturedRequests,
     gaps: state.networkCapture.gaps?.map(gap => gap.kind)
   };
-  if (row.businessStatus !== "unknown") {
-    row.status = row.businessStatus;
-    row.evidence.state = row.evidence.business;
-  } else if (row.status === "unknown" && state.state === "failed") {
+  if (state.state === "failed") {
     row.status = "fail";
     row.evidence.state = source;
+  } else if (row.status !== "fail" && row.businessStatus !== "unknown") {
+    row.status = row.businessStatus;
+    row.evidence.state = row.evidence.business;
   }
 }
 
@@ -593,7 +601,7 @@ export async function collectBrowserOperations({ day, timeZone = "Asia/Hong_Kong
     for (const row of result.rows) {
       row.category = categoryOf(row.operation);
       const state = executions.get(row.executionId);
-      if (state && row.source === "oracle_codex") applyExecution(row, state, { path: recorder.path, executionId: state.executionId });
+      if (state && row.source === "oracle_codex" && row.category === "operation") applyExecution(row, state, { path: recorder.path, executionId: state.executionId });
       rows.push(row);
     }
     sources[source] = { ...summarizeOperations(result.rows), coverage: result.coverage };
@@ -601,7 +609,7 @@ export async function collectBrowserOperations({ day, timeZone = "Asia/Hong_Kong
   rows.sort((a, b) => a.timestamp.localeCompare(b.timestamp)
     || a.source.localeCompare(b.source) || String(a.callId).localeCompare(String(b.callId))
     || (a.operationIndex ?? 1) - (b.operationIndex ?? 1));
-  return { day, timeZone, observedUntil: new Date(window.until).toISOString(), totals: summarizeOperations(rows), sources, rows, recorder };
+  return { day, timeZone, observedUntil: new Date(window.until).toISOString(), totals: summarizeOperations(rows), sources, rows, recorder: { ...recorder, executions: recorder.executions.map(({ result, ...item }) => item) } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
