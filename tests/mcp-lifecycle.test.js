@@ -1206,3 +1206,36 @@ test('tagged page procedures are recalled, confirmed and corrected across enviro
   assert.equal(corrected.feedback.changedMemoryIds[0], id);
   assert.equal((await call('memory_get', { memoryId: id })).summary, 'Updated setup');
 });
+
+test('unknown handoff carries observed progress and the remaining goal into review', async t => {
+  const { adapter } = makeAdapter();
+  const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter });
+  const client = await withMcp(t, service, 'all');
+  const call = (name, args) => client.callTool({ name, arguments: args });
+  const data = response => {
+    assert.notEqual(response.isError, true, JSON.stringify(response));
+    return response.structuredContent.data;
+  };
+  const begin = async id => data(await call('run_begin', { requestId: id, goal: 'Apply mapping and sync',
+    url: 'https://example.test', criteria: [{ id: 'synced', path: 'synced', equals: true }] })).runId;
+  const runId = await begin('mapping');
+  const other = await begin('other');
+  const started = data(await call('browser_run', { runId, requestId: 'read-mapping', purpose: 'observe',
+    code: 'return { customer: { code: "C-1001" } };' }));
+  const { observationId } = await waitForExecution(client, runId, started.executionId);
+  const partialHandoff = { reason: 'business_incomplete', remaining: 'Sync has not run.',
+    observedSteps: [{ step: 'Read customer mapping', observationId }] };
+  const finish = { runId, requestId: 'handoff', outcome: 'unknown', partialHandoff };
+  assert.equal((await call('run_finish', { ...finish, runId: other })).isError, true);
+  assert.equal((await call('run_finish', { ...finish, outcome: 'succeeded' })).isError, true);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(data(await call('run_finish', finish)).feedback.partialHandoff, partialHandoff);
+  }
+  for (const name of ['eval_packet', 'run_summary']) {
+    const result = data(await call(name, { runId }));
+    assert.equal(result.executionOutcome, 'unknown');
+    assert.deepEqual(result.partialHandoff, partialHandoff);
+  }
+  data(await call('run_finish', { runId, requestId: 'updated', outcome: 'unknown', note: 'New handoff' }));
+  assert.equal(data(await call('run_summary', { runId })).partialHandoff, undefined);
+});

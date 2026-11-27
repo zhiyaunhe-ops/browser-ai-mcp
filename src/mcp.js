@@ -4,6 +4,7 @@
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
+const { partialHandoff } = require('./partial-handoff');
 const { createService } = require('./service');
 const { registerEvaluationTools, reviewMemorySchema, sessionSource } = require('./review');
 const { link: improvementLink } = require('./review/improvements');
@@ -137,8 +138,9 @@ function createMcpServer(service = createService(), toolset = 'execution') {
   register('run_get', 'Read durable run and execution state without replaying commands. Query the executionId returned by the round or in blockingExecutions. Also reconciles completed result files.', {
     runId: text, executionId: text.optional(), ...pagination
   }, args => service.get(args));
-  register('run_finish', 'Close a run with its outcome and criterion-to-observation references. Success requires matching independent readbacks after the last write. Optional updates record versioned memory changes.', {
+  register('run_finish', 'Close a run with its outcome and criterion-to-observation references. Success requires matching independent readbacks after the last write. For unknown, partialHandoff records the primary reason, remaining work and observed steps.', {
     ...idempotent, outcome: z.enum(['succeeded', 'failed', 'unknown', 'cancelled']),
+    partialHandoff: partialHandoff.optional(),
     verification: z.array(z.object({ criterionId: text, observationId: text })).default([]),
     decision: z.enum(['confirmed', 'corrected', 'learned', 'no-change']).optional(),
     usedMemoryIds: z.array(text).default([]), updates: z.array(z.record(z.unknown())).max(10).default([]),

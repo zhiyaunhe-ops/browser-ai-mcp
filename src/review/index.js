@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
+const { partialHandoff } = require('../partial-handoff');
 const { callReviewToolkit, resolveDomainTag } = require('./review-toolkit');
 const { sessionContext, sessionSearch } = require('./session-context');
 const { registerImprovementTools, recordVerification, link, proposal, plan } = require('./improvements');
@@ -61,6 +62,7 @@ function packet(service, { runId, reviewKey, cursor = 0, limit = 10 }) {
   }));
   return { schemaVersion: 1, runId, ...(run.improvement ? { improvement: run.improvement } : {}), reviewKey: run.feedback.requestId, reviewState,
     ...edition(run.domain_tag), goal: run.goal, url: run.url,
+    ...(run.feedback.partialHandoff ? { partialHandoff: run.feedback.partialHandoff } : {}),
     sessionSearch: sessionSearch(), ...(run.sessionSource ? { sessionSource: run.sessionSource } : {}), criteria: run.criteria, executionOutcome: run.feedback.outcome, executionNote: run.feedback.note,
     lastWriteSequence: run.lastWriteSequence ?? 0, verification: run.feedback.verification,
     readbacks: service.criterionReadbacks(run), gaps: service.gaps(runId), relatedReviews,
@@ -167,7 +169,7 @@ function registerEvaluationTools(register, service) {
     z.object({ schemaVersion: z.literal(1), ...runId, improvement: link.extend({ delivery: z.number() }).optional(), ...editionField, reviewKey: text, reviewState: state, goal: text, url: text, sessionSource: sessionSource.optional(),
       sessionSearch: z.object({ roots: z.array(z.object({ client: text, path: text })), instructions: text }),
       criteria: z.array(z.object({ id: text, path: z.string(), equals: z.unknown() })), executionOutcome: text,
-      executionNote: z.string(), verification: z.array(z.object({ criterionId: text, observationId: text })),
+      partialHandoff: partialHandoff.optional(), executionNote: z.string(), verification: z.array(z.object({ criterionId: text, observationId: text })),
       readbacks: z.array(z.object({ criterionId: text, path: z.string(), expected: z.unknown(),
         found: z.boolean(), observationId: text.optional(), executionId: text.optional(), observedAt: z.number().optional(),
         afterLastWrite: z.boolean().optional(), matchesExpected: z.boolean().optional(), actual: z.unknown().optional() })),
@@ -184,8 +186,9 @@ function registerEvaluationTools(register, service) {
     const review = reviewState === 'reviewed' ? service.store.get('evaluation', run.reviewId) : null;
     return { runId: run.runId, ...edition(run.domain_tag), goal: run.goal, url: run.url,
       executionOutcome: reviewState === 'not_ready' ? run.outcome ?? null : run.feedback.outcome, reviewState,
+      ...(reviewState !== 'not_ready' && run.feedback.partialHandoff ? { partialHandoff: run.feedback.partialHandoff } : {}),
       review: review ? { ...edition(run.domain_tag), ...review } : null };
-  }, z.object({ ...runId, ...editionField, goal: text, url: text, executionOutcome: text.nullable(), reviewState: state, review: report.nullable() }));
+  }, z.object({ ...runId, ...editionField, goal: text, url: text, executionOutcome: text.nullable(), partialHandoff: partialHandoff.optional(), reviewState: state, review: report.nullable() }));
   register('eval_session_context', 'Read local session JSONL by absolute path and physical line number. Returns bounded records and nextLine.', {
     path: text, startLine: z.number().int().positive().optional(), limit: z.number().int().min(1).max(50).optional()
   }, sessionContext);

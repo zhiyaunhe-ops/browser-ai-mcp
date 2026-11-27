@@ -29,6 +29,7 @@ function canonical(value) {
 }
 const fingerprint = value => crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const finishBody = args => ({ outcome: args.outcome, decision: args.decision, note: args.note,
+  ...(args.partialHandoff ? { partialHandoff: args.partialHandoff } : {}),
   verification: args.verification || [], usedMemoryIds: args.usedMemoryIds || [],
   updates: args.updates || [], keepPages: args.keepPages || [] });
 function archiveHandoff(run) {
@@ -606,6 +607,14 @@ class BrowserService {
         runId: run.runId, blockingExecutions: blocking.map(executionReference)
       });
       const verification = args.verification || [];
+      if (args.partialHandoff) {
+        if (args.outcome !== 'unknown') throw problem('INVALID_ARGUMENT', 'partialHandoff requires outcome unknown');
+        for (const step of args.partialHandoff.observedSteps) {
+          if (this.store.get('observation', step.observationId)?.runId !== run.runId) {
+            throw problem('INVALID_ARGUMENT', 'Each observed step must reference an observation from this run');
+          }
+        }
+      }
       const evidenceIds = [];
       if (args.outcome === 'succeeded') {
         if (!run.criteria.length) throw problem('VERIFICATION_REQUIRED', 'Successful completion requires criteria declared in run_begin');
@@ -640,6 +649,7 @@ class BrowserService {
       }
       archiveHandoff(run);
       run.feedback = { requestId: args.requestId, sequence: run.sequence, outcome: args.outcome, decision: args.decision,
+        ...(args.partialHandoff ? { partialHandoff: args.partialHandoff } : {}),
         verification, note: args.note, usedMemoryIds: used, recalledMemoryIds: recalled,
         changedMemoryIds, resolvedUnknownExecutions: args.outcome === 'succeeded' ? executions.filter(e => e.state === 'outcome_unknown').map(e => e.executionId) : [],
         submittedAt: this.now() };
