@@ -14,7 +14,7 @@ const actions = new Set([
 async function call({ action, arguments: args }) {
   if (!actions.has(action)) throw new Error(`Unknown review provider action: ${action}`);
   const service = createService();
-  const server = createMcpServer(service);
+  const server = createMcpServer(service, 'review');
   const client = new Client({ name: 'yonclaw-toolkit', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {

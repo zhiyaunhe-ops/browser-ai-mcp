@@ -45,8 +45,8 @@ function makeAdapter(overrides = {}) {
   return { adapter, calls };
 }
 
-async function withMcp(t, service) {
-  const server = createMcpServer(service);
+async function withMcp(t, service, toolset) {
+  const server = createMcpServer(service, toolset);
   const client = new Client({ name: 'mcp-test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -73,9 +73,8 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
   const dataDir = temporaryDirectory();
   const { adapter, calls } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
 
-  assert.match(client.getInstructions(), /asp_ui_template_update_field/);
   const listed = await client.listTools();
   const templateTool = listed.tools.find(item => item.name === 'asp_ui_template_update_field');
   assert.match(templateTool.description, /changes=\{\}/);
@@ -88,6 +87,24 @@ test('MCP exposes tools and completes a verified memory workflow with idempotent
     'yonbuilder_app_get', 'yonbuilder_app_list', 'yonbuilder_bizobj_list', 'yonbuilder_cli', 'yonbuilder_current_page',
     'yonbuilder_field_get', 'yonbuilder_field_preview', 'yonbuilder_field_set', 'yonbuilder_interaction_rule', 'yonbuilder_open', 'yonbuilder_page_list',
   ]);
+
+  for (const argv of [
+    ['metadata', 'find', '--biz-obj-code= '],
+    ['metadata', 'find', '--biz-obj-code', '--format', 'json'],
+    ['metadata', 'find', '--biz-obj-code']
+  ]) {
+    const result = await client.callTool({ name: 'yonbuilder_cli',
+      arguments: { entry: 'bip-cli', targetTenantId: 'fixture', argv } });
+    assert.equal(result.structuredContent.data.code, 'INVALID_ARGUMENT');
+  }
+  const ruleTarget = { runId: 'fixture', requestId: 'edit', templateId: '1', billNo: 'bill',
+    ownDomain: 'domain', ruleCode: 'fixture' };
+  for (const operation of [{ operation: 'capture' }, { operation: 'rename', expectedName: 'Before' }]) {
+    const result = await client.callTool({ name: 'yonbuilder_interaction_rule',
+      arguments: { ...ruleTarget, ...operation } });
+    assert.equal(result.structuredContent.data.code, 'INVALID_ARGUMENT');
+  }
+  assert.equal(calls.run.length, 0);
 
   const beginArgs = {
     requestId: 'begin-1', goal: 'Create customer C-1001', url: 'http://127.0.0.1:43127/customers',
@@ -513,8 +530,12 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const executorService = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
   const executor = await withMcp(t, executorService);
   const reviewerService = createService({ dataDir, egoAdapter: adapter, idFactory: (() => { let n = 0; return () => `review-${++n}`; })(), waitMs: 5 });
-  const reviewer = await withMcp(t, reviewerService);
-  await reviewer.listTools();
+  const reviewer = await withMcp(t, reviewerService, 'review');
+  const reviewTools = (await reviewer.listTools()).tools.map(tool => tool.name).sort();
+  assert.deepEqual(reviewTools, ['eval_packet', 'eval_pending', 'eval_session_context', 'eval_submit',
+    'evidence_query', 'review_apply', 'review_history', 'review_improve', 'review_improvements', 'review_observe', 'run_summary']);
+  const executionTools = (await executor.listTools()).tools.map(tool => tool.name);
+  assert.deepEqual(executionTools.filter(name => reviewTools.includes(name)), ['evidence_query']);
   const call = (client, name, args) => client.callTool({ name, arguments: args });
   const data = response => { assert.notEqual(response.isError, true, JSON.stringify(response)); return response.structuredContent.data; };
   const begin = async requestId => data(await call(executor, 'run_begin', { requestId, goal: 'Inspect customer',
@@ -530,7 +551,7 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const foreign = await observe(other);
   const extra = data(await call(executor, 'browser_run', { runId: run.runId, requestId: 'extra-observe', purpose: 'observe', code: 'return { ok: true };' }));
   await waitForExecution(executor, run.runId, extra.executionId);
-  assert.equal(data(await call(reviewer, 'run_get', { runId: run.runId })).reviewState, 'not_ready');
+  assert.equal(data(await call(reviewer, 'run_summary', { runId: run.runId })).reviewState, 'not_ready');
   const finished = data(await call(executor, 'run_finish', { runId: run.runId, requestId: ' handoff ', outcome: 'succeeded',
     note: 'Customer observed.', verification: [{ criterionId: ' customer ', observationId: observation.observationId }] }));
   assert.equal(finished.reviewState, 'pending');
@@ -579,7 +600,7 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
   const duplicate = await call(reviewer, 'eval_submit', { ...submission, requestId: 'another-review' });
   assert.equal(duplicate.isError, true);
   assert.equal(duplicate.structuredContent.data.code, 'EVAL_ALREADY_SUBMITTED');
-  const summary = data(await call(executor, 'run_summary', { runId: run.runId }));
+  const summary = data(await call(reviewer, 'run_summary', { runId: run.runId }));
   assert.equal(summary.reviewState, 'reviewed');
   assert.deepEqual(summary.review, review);
   assert.equal(review.verdict, 'pass');
@@ -597,7 +618,7 @@ test('independent clients hand off, submit and retrieve a review with scoped evi
 test('review lessons are recalled for similar goals on the same origin in later runs', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -642,7 +663,7 @@ test('review lessons are recalled for similar goals on the same origin in later 
 test('preregistered prediction survives handoff and cannot be rewritten in the review', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = (name, args) => client.callTool({ name, arguments: args });
   const data = response => { assert.notEqual(response.isError, true, JSON.stringify(response)); return response.structuredContent.data; };
   const memory = { problem_id: 'preregistered', context: 'Fixture', rationale: 'Reason',
@@ -664,7 +685,7 @@ test('preregistered prediction survives handoff and cannot be rewritten in the r
 test('legacy unknown handoff with a later execution is not queued for review', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const invoke = (name, args) => client.callTool({ name, arguments: args });
   const run = (await invoke('run_begin', { requestId: 'legacy-begin', goal: 'Inspect', url: 'https://example.test/', criteria: [] })).structuredContent.data;
   const finish = await invoke('run_finish', { runId: run.runId, requestId: 'legacy-finish', outcome: 'unknown', note: 'Unknown.' });
@@ -683,7 +704,7 @@ test('idle active and needs-verification runs receive an idempotent automatic re
   let now = Date.UTC(2026, 10, 25, 0, 0, 0);
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: makeAdapter().adapter,
     idFactory: identifiers(), clock: () => now, waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args = {}) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -725,7 +746,7 @@ test('awaiting-user runs are handed off immediately and explicit unknown finish 
   } });
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter,
     idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args = {}) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -759,7 +780,7 @@ test('a new execution sequence invalidates an automatic review packet', async t 
   let now = Date.UTC(2026, 10, 25, 1, 0, 0);
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: makeAdapter().adapter,
     idFactory: identifiers(), clock: () => now, waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args = {}) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -785,7 +806,7 @@ test('a new execution sequence invalidates an automatic review packet', async t 
 test('review lessons follow the ASP edition across environments and isolate other editions', async t => {
   const { adapter } = makeAdapter();
   const service = createService({ dataDir: temporaryDirectory(), egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -818,7 +839,7 @@ test('Toolkit central eval actions read and submit a Browser handoff offline', a
   const dataDir = temporaryDirectory();
   const { adapter } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -868,7 +889,7 @@ test('embedded review toolkit supports session context and browser review observ
   });
   const { adapter } = makeAdapter();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -955,7 +976,7 @@ test('improvement loop requires a version-matched linked pass and records fail/r
   execFileSync('git', ['-C', artifactRepo, 'commit', '-m', 'fix saved indicator', '-m', 'Submitted-by: Codex (GPT-6)'], { stdio: 'ignore' });
   const version = execFileSync('git', ['-C', artifactRepo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));
@@ -1062,7 +1083,7 @@ test('review submission can atomically plan a memory update and verifies its sto
     return { state: 'succeeded', result: { saved: true }, spaceId: 41, executionStopped: true };
   } });
   const service = createService({ dataDir, egoAdapter: adapter, idFactory: identifiers(), waitMs: 5 });
-  const client = await withMcp(t, service);
+  const client = await withMcp(t, service, 'all');
   const call = async (name, args) => {
     const response = await client.callTool({ name, arguments: args });
     assert.notEqual(response.isError, true, JSON.stringify(response));

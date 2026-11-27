@@ -72,6 +72,14 @@ console.log(JSON.stringify({ mcpServers: { 'browser-ai': server } }, null, 2))
 
 保存后，重启客户端管理的 MCP 服务，让客户端持有 Node 进程。使用默认数据目录即可，通常无需另外配置启动目录。
 
+默认的 `browser-ai` 仅提供执行工具。评审会话单独启用同一入口的 `--tools review`，服务名使用 `browser-ai-review`，数据目录与执行端一致。参见[评审流程](skills/browser-ai-review/SKILL.md)。
+
+## 可选的 YonBuilder 与流程目录
+
+Extract the portable CLI archive locally. Set `BROWSER_AI_PORTABLE_ROOT` to its extracted `yon-tools` directory and `BROWSER_AI_YONBUILDER_WORKSPACE` to the authenticated workspace. The server runs the scripts in `iuap-apcom-cli/scripts/` with the Node executable in `bin/`. Existing plugin installations can continue using `BROWSER_AI_YONBUILDER_ROOT`.
+
+Set `BROWSER_AI_PROCEDURES_DIR` to an operator-controlled directory of procedure folders. Each folder has a `SKILL.md` with JSON front matter between `---` lines, containing `id`, `version`, `description`, `nodes`, `goalTerms`, `entry`, and optionally `productVersion`, `node` and `flow`. The entry exports an async `probe({ task, page, input })`. The public checkout ships without deployment-specific procedure packages.
+
 ## 确认安装成功
 
 在客户端的工具列表中找到 `run_begin`、`browser_run`、`run_get` 和 `run_finish`。再把下面这句话交给已连接的 Agent，确认它能通过桌面浏览器完成一次读取。

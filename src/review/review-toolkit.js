@@ -4,7 +4,7 @@ const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 const path = require('node:path');
 
-const toolkitEntry = () => process.env.BROWSER_AI_REVIEW_TOOLKIT || path.join(__dirname, 'vendor', 'review', 'review.py');
+const toolkitEntry = () => process.env.BROWSER_AI_REVIEW_TOOLKIT || path.join(__dirname, '..', 'vendor', 'review', 'review.py');
 
 function callReviewToolkit(command, input, args = []) {
   const entry = toolkitEntry();
