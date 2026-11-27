@@ -3,7 +3,7 @@ const protectedMethods = new WeakSet();
 
 function assertCookieScope(method, params) {
   if (blockedMethods.has(method)) {
-    const error = new Error(`Browser AI MCP blocked ${method} because it clears cookies for a whole browser profile.`);
+    const error = new Error(`Browser AI MCP blocked ${method} because it clears cookies for a whole browser profile. To clear the current site, call page.cdp("Storage.clearDataForOrigin", { origin: new URL(await page.url()).origin, storageTypes: "cookies" }). To remove one named cookie, use Network.deleteCookies with its name and URL.`);
     error.code = 'EGO_PROFILE_COOKIE_CLEAR_BLOCKED';
     throw error;
   }

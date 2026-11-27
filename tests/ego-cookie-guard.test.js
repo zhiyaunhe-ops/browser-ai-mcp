@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
-const blocked = { code: 'EGO_PROFILE_COOKIE_CLEAR_BLOCKED' };
+const blocked = { code: 'EGO_PROFILE_COOKIE_CLEAR_BLOCKED', message: /Storage\.clearDataForOrigin.*Network\.deleteCookies/ };
 
 test('blocks profile-wide CDP cookie clears on task, existing and later pages, and legacy transports', async () => {
   const { installCookieGuard } = await import('../scripts/ego-cookie-guard.mjs');
