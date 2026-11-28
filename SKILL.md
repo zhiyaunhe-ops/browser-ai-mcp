@@ -20,6 +20,10 @@ description: 用 YonBuilder 查询业务元数据和数据库结构，用 browse
 4. 保存后，在单独的 `observe` 轮次重新打开目标记录并读取实际值。写入结果未明时先查原执行和记录现状，再决定下一步。
 5. 用 `run_finish` 提交各验收条件的观察引用。匹配填 `succeeded`，确认不符填 `failed`，部分完成或仍待核验时填 `unknown`。用 `partialHandoff.reason` 区分业务未完成（`business_incomplete`）、操作已完成但缺目标回读（`missing_readback`）、现有回读与预设断言不相容（`criteria_mismatch`）。若业务仍有待办，优先选业务未完成。在 `remaining` 写明具体缺口，已回读的步骤列入 `observedSteps`，每项附本 run 的 `observationId`。
 
+遇到 `EGO_PROGRAM_CONTRACT`、`INVALID_ARGUMENT` 或 `INVALID_RESOLUTION` 时，先读取返回的问题位置、参数要求和相关执行信息，按当前安装的 API 修正调用，再继续操作；不要原样重试或放宽契约。若执行是否生效仍未知，先查询原执行和记录现状，不重放写入。错误消失不能替代业务回读。
+
+`run_finish` 验证被拒绝时，核对返回的 `readbacks`、原执行和已有观察，确认引用属于本 run、位于最后一次写入之后，并支持对应验收条件。缺少回读或结果未明时保留 `unknown` 和具体交接缺口，不通过修改验收条件消除拒绝。评审材料应保留各次结束请求的 outcome、verification 和返回记录位置，说明最终结论依据；结束调用被接受只表示工具接受了交接。
+
 ## Related documents
 
 - [浏览器工具、字段操作与批量验收](references/browser-workflows.md)

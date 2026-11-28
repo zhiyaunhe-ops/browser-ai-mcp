@@ -17,3 +17,4 @@
 - [AI 操作入口](SKILL.md)
 - [浏览器评估报告](reviews/browser/README.md)
 - [浏览器 Eval · 2026-11-26](reviews/browser/2026-11-26.md)
+- [浏览器 Eval · 2026-11-27](reviews/browser/2026-11-27.md)

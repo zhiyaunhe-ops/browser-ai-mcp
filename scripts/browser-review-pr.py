@@ -78,7 +78,17 @@ def review_brief(packet):
         overview = {key: value for key, value in coverage.items() if isinstance(value, (bool, int))}
         if "roots" in coverage:
             overview["rootStatus"] = dict(Counter(root["status"] for root in coverage["roots"]))
+            overview["rootCoverage"] = [
+                {"status": root["status"], "packetPointer": f"/sources/{name}/coverage/roots/{index}"}
+                for index, root in enumerate(coverage["roots"])
+            ]
             overview["unreadableFiles"] = len(coverage["unreadableFiles"])
+        if "dynamicShellCommandRefs" in coverage:
+            overview["dynamicShellCommandRefs"] = [
+                {"count": ref["count"], "line": ref["line"],
+                 "packetPointer": f"/sources/{name}/coverage/dynamicShellCommandRefs/{index}"}
+                for index, ref in enumerate(coverage["dynamicShellCommandRefs"])
+            ]
         if "receipts" in coverage:
             receipts = sorted(coverage["receipts"], key=lambda item: item["captured"], reverse=True)
             overview["receiptCount"] = len(receipts)
@@ -122,13 +132,56 @@ def review_brief(packet):
 
     # Consecutive identical entries share a span; each row stays addressable by its packet position.
     spans = []
+    runs = defaultdict(list)
     for index, row in enumerate(packet["rows"], start=1):
+        if row.get("runId"):
+            runs[row["source"], row["runId"]].append((index, row))
         fields = [row["source"], row["operation"], row["status"], bool(row.get("wrapperCallSiteOnly")),
                   row.get("executionState"), bool(row.get("observationId")), row.get("errorCode")]
         if spans and fields == spans[-1][2:]:
             spans[-1][1] = index
         else:
             spans.append([index, index, *fields])
+
+    # Reference links locate recorded observations; they do not validate business assertions.
+    finish_checks = []
+    for index, row in enumerate(packet["rows"], start=1):
+        if row["operation"] != "run_finish":
+            continue
+        request = row.get("finishRequest", {})
+        verification = request.get("verification")
+        related = runs.get((row["source"], row.get("runId")), [])
+        links = [
+            {"reference": position, "observationRows": [
+                number for number, observed in related
+                if ref.get("observationId") and observed.get("observationId") == ref["observationId"]
+            ]}
+            for position, ref in enumerate(verification or [], start=1)
+        ]
+        requested_outcome = request.get("outcome")
+        gaps = []
+        if not row.get("runId"):
+            gaps.append("run_id_unavailable")
+        if requested_outcome not in ("succeeded", "failed", "unknown", "cancelled"):
+            requested_outcome = None
+            gaps.append("finish_outcome_unavailable")
+        if not isinstance(verification, list):
+            gaps.append("verification_request_unavailable")
+        elif not verification:
+            gaps.append("verification_refs_empty")
+        if any(not link["observationRows"] for link in links):
+            gaps.append("verification_reference_not_in_session_rows")
+        finish_checks.append({
+            "row": index, "source": row["source"], "status": row["status"],
+            "toolStatus": row.get("toolStatus"), "requestedOutcome": requested_outcome,
+            "packetPointer": f"/rows/{index - 1}",
+            "sameRunFinishRows": [number for number, other in related if other["operation"] == "run_finish"],
+            "verificationLinks": links, "gaps": gaps,
+            "references": {
+                kind: {key: ref[key] for key in ("line", "seq") if key in ref}
+                for kind, ref in row["evidence"].items() if ref
+            },
+        })
     recorder = packet.get("recorder", {})
     return {
         "day": packet["day"], "timeZone": packet["timeZone"], "observedUntil": packet.get("observedUntil"),
@@ -136,7 +189,7 @@ def review_brief(packet):
         "recorder": {"available": recorder.get("available", False), "executionStates": dict(Counter(
             item["state"] for item in recorder.get("executions", [])
         ))},
-        "samples": samples,
+        "samples": samples, "runFinishChecks": finish_checks,
         "rowIndexColumns": ["first", "last", "source", "tool", "status", "callSiteOnly",
                             "executionState", "hasObservationId", "errorCode"],
         "rowIndex": spans if len(json.dumps(spans)) < 200000 else None,
