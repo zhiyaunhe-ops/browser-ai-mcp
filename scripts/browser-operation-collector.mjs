@@ -20,7 +20,7 @@ const review = /^(?:eval_|review_|memory_|evidence_query$)/;
 const categoryOf = operation => lifecycle.test(operation) ? "lifecycle" : review.test(operation) ? "review" : "operation";
 const knownTool = /^(?:browser_run|run_(?:begin|get|finish|summary)|asp_(?:workbench|ui_template)_\w+|eval_\w+|review_\w+|memory_(?:get|search)|evidence_query|recipe_draft)$/;
 const shellTool = /^(?:bash|pwsh|shell|shell_command|exec_command|terminal\.exec)$/;
-const callMarker = /browser|playwright|selenium|puppeteer|chrome|chromium|msedge|[Cc][Dd][Pp]|computer[_-]use|web__run|search_service_web_run|"web"|run_(?:begin|get|finish|summary)|asp[_-]|ys-|yonyou-(?:nav|view|branch|publish-node)|eval_|review_|memory_|evidence_query|recipe_draft/;
+const callMarker = /exec_command|browser|playwright|selenium|puppeteer|chrome|chromium|msedge|[Cc][Dd][Pp]|computer[_-]use|web__run|search_service_web_run|"web"|run_(?:begin|get|finish|summary)|asp[_-]|ys-|yonyou-(?:nav|view|branch|publish-node)|eval_|review_|memory_|evidence_query|recipe_draft/;
 const resultId = /"(?:call_id|toolCallId)"\s*:\s*"([^"]+)"/;
 const sessionFile = /\.(?:jsonl(?:\.zs(?:t|td))?|zstd)$/i;
 const stateSet = new Set(["running", "succeeded", "failed", "outcome_unknown", "cancelled", "pending", "queued", "needs_user_action", "completed"]);
@@ -299,7 +299,8 @@ const laterState = (existing, candidate) => !existing
 async function scanSource(source, roots, { inDay, until }) {
   const files = new Set(), coverage = {
     roots: [], files: 0, unreadableFiles: [], corruptFrames: 0, malformedLines: 0, malformedArguments: 0,
-    unparsedWrappers: 0, dynamicWrapperDispatches: 0, dynamicShellCommands: 0, dynamicWebCalls: 0, uninspectedScriptCommands: 0, missingCallIds: 0, missingTimestamps: 0, duplicateCalls: 0, conflictingExecutionStates: 0
+    unparsedWrappers: 0, dynamicWrapperDispatches: 0, dynamicShellCommands: 0, dynamicWebCalls: 0, uninspectedScriptCommands: 0, missingCallIds: 0, missingTimestamps: 0, duplicateCalls: 0, conflictingExecutionStates: 0,
+    dynamicShellCommandRefs: []
   };
   for (const root of new Set(roots.map(root => path.resolve(root)))) {
     try {
@@ -355,7 +356,12 @@ async function scanSource(source, roots, { inDay, until }) {
         }
         const selected = record.time !== null && inDay(record.time);
         const dayCoverage = selected ? coverage : outsideDay;
+        const dynamicShellBefore = dayCoverage.dynamicShellCommands;
         const operations = readCall(record, dayCoverage);
+        if (selected && dayCoverage.dynamicShellCommands > dynamicShellBefore) {
+          coverage.dynamicShellCommandRefs.push({ ...evidence(record),
+            count: dayCoverage.dynamicShellCommands - dynamicShellBefore });
+        }
         if (!operations.length) continue;
         if (record.time === null) { coverage.missingTimestamps++; continue; }
         if (!record.callId) { dayCoverage.missingCallIds++; continue; }
@@ -371,6 +377,13 @@ async function scanSource(source, roots, { inDay, until }) {
           };
           if (typeof operation.code === "string" && selected) row.metrics = analyzeCode(operation.code);
           if (operation.args?.purpose) row.purpose = operation.args.purpose;
+          if (operation.operation === "run_finish") {
+            const verification = operation.args?.verification;
+            row.finishRequest = { outcome: operation.args?.outcome ?? null,
+              verification: Array.isArray(verification)
+                ? verification.map(ref => ({ criterionId: ref?.criterionId, observationId: ref?.observationId }))
+                : null };
+          }
           if (operation.wrapped) row.wrapperCallSiteOnly = true;
           if (operation.conditional) row.wrapperConditional = true;
           if (operation.skipped) row.wrapperExecution = "condition_not_met";
